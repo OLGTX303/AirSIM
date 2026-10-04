@@ -1,6 +1,6 @@
 local M = {}
 
-local RECORD_BUFFER_BYTES = 1920
+local RECORD_BUFFER_BYTES = 640
 local MAX_PENDING_MS = 400
 
 local function quality_rate(cc)
