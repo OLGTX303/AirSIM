@@ -91,13 +91,14 @@ function M:start_uplink_source()
     if not av or av.DATA_CODEC_TYPE_RAW==nil then return false,"audio_v2_raw_unavailable" end
 
     self.sample_rate=quality_rate(self.cc)
+    self.uplink_sample_rate=16000
     pcall(self.cc.extern_source,nil)
-    local ok,result=pcall(self.cc.extern_source,true,true,av.DATA_CODEC_TYPE_RAW,true,self.sample_rate,16,1,true)
+    local ok,result=pcall(self.cc.extern_source,true,true,av.DATA_CODEC_TYPE_RAW,true,self.uplink_sample_rate,16,1,true)
     if not ok or result==false then return false,"extern_source_failed" end
 
     self.external_started=true
     self.input_ready=true
-    if log then log.info("airsim.media","external_pcm_ready",self.sample_rate) end
+    if log then log.info("airsim.media","external_pcm_ready",self.sample_rate,self.uplink_sample_rate) end
     return true
 end
 
@@ -146,6 +147,7 @@ end
 function M:stats()
     return {
         sample_rate=self.sample_rate or 8000,
+        uplink_sample_rate=self.uplink_sample_rate or 16000,
         downlink_frames=self.downlink_frames,
         downlink_bytes=self.downlink_bytes,
         uplink_frames=self.uplink_frames,
