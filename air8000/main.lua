@@ -1,4 +1,4 @@
-PROJECT="airsim-air8000"; VERSION="001.000.000"
+PROJECT="airsim-air8000"; VERSION="001.000.001"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
@@ -21,7 +21,7 @@ if fskv then
     }
 end
 if kv_api then cfg=settings.load(kv_api,cfg) end
-local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient})
+local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2})
 local device_identity=identity.read(mobile,mcu,cfg)
 local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION)
 if wlan and wlan.connect and cfg.wifi and type(cfg.wifi.ssid)=="string" and cfg.wifi.ssid ~= "" then
@@ -37,46 +37,111 @@ end
 local pcm=pcm_module.new(cc,nil,nil)
 local media_frames=0
 local media_bytes=0
--- cc.hangUp() and cc.record() depend on the VoLTE control task created by
--- cc.init().  Initialize it once at boot; otherwise hang-up can be queued to
--- a missing task and speech start returns the modem error seen in the log.
+local uplink_frames=0
+local uplink_bytes=0
+local downlink_pending=""
+
+-- cc.hangUp(), cc.record() and external call audio depend on cc.init().
 if cc and cc.init then
-    local init_ok, init_result = pcall(cc.init, 0)
-    if log then log.info("airsim.call", "cc_init", tostring(init_ok and init_result)) end
+    local init_ok,init_result=pcall(cc.init,0)
+    if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result)) end
 end
+
 local function stop_media()
     if pcm.active then pcm:stop() end
+    downlink_pending=""
+    uplink_frames=0
+    uplink_bytes=0
 end
+
+local function send_downlink(payload)
+    if type(payload)~="string" or #payload==0 or not _G.relay_transport then return end
+    downlink_pending=downlink_pending..payload
+    -- 40 ms packets: 640 bytes at 8 kHz, 1280 bytes at 16 kHz, S16LE mono.
+    local frame_bytes=pcm.sample_rate==16000 and 1280 or 640
+    while #downlink_pending>=frame_bytes do
+        local frame=downlink_pending:sub(1,frame_bytes)
+        downlink_pending=downlink_pending:sub(frame_bytes+1)
+        local sent=_G.relay_transport:send_binary(frame)
+        if sent then
+            media_frames=media_frames+1
+            media_bytes=media_bytes+#frame
+            if log and (media_frames==1 or media_frames%25==0) then
+                log.info("airsim.media","downlink",media_frames,media_bytes)
+            end
+        else
+            -- Put the frame back once. Keeping a bounded short tail is better
+            -- than silently consuming the remote party voice.
+            downlink_pending=frame..downlink_pending
+            local max_tail=(pcm.sample_rate==16000 and 6400 or 3200)
+            if #downlink_pending>max_tail then
+                downlink_pending=downlink_pending:sub(#downlink_pending-max_tail+1)
+            end
+            if log then log.warn("airsim.media","downlink_send_failed",#frame) end
+            break
+        end
+    end
+end
+
+local function announce_media(kind)
+    if not _G.relay_client then return end
+    local stats=pcm:stats()
+    _G.relay_client:send(kind,{
+        call_id=pcm.call_id,
+        sample_rate=stats.sample_rate,
+        downlink_sample_rate=stats.sample_rate,
+        uplink_sample_rate=stats.uplink_sample_rate,
+        channels=1,
+        bits=16,
+        format="pcm_s16le",
+        frame_duration_ms=40,
+        stats=stats,
+    },os.time()*1000)
+end
+
 local function start_media(call)
+    if pcm.active then return true end
     if not _G.relay_transport or not _G.relay_transport.send_binary then
-        if log then log.warn("airsim.media", "start_failed", "transport_unavailable") end
+        if log then log.warn("airsim.media","start_failed","transport_unavailable") end
         return false,"media_transport_unavailable"
     end
     media_frames=0
     media_bytes=0
-    local ok,err=pcm:start(call.call_id,function(is_dl,point)
-        if not is_dl then return end
-        local used=point and point.used and point:used() or 0
-        local payload=point and point.toStr and point:toStr(0,used) or nil
-        if type(payload)=="string" and #payload > 0 and _G.relay_transport then
-            local sent=_G.relay_transport:send_binary(payload)
-            if sent then
-                media_frames=media_frames+1
-                media_bytes=media_bytes+#payload
-                if log and (media_frames==1 or media_frames%50==0) then log.info("airsim.media", "downlink", media_frames, media_bytes) end
-            elseif log then
-                log.warn("airsim.media", "downlink_send_failed")
-            end
-        end
+    uplink_frames=0
+    uplink_bytes=0
+    downlink_pending=""
+    local ok,err=pcm:start(call.call_id,function(is_dl,payload)
+        if is_dl then send_downlink(payload) end
     end)
-    if log then log.info("airsim.media", "start", tostring(ok), tostring(err or ""), tostring(pcm.sample_rate)) end
-    if ok and _G.relay_client then _G.relay_client:send("media.open",{call_id=call.call_id,sample_rate=pcm.sample_rate,channels=1,bits=16,format="pcm_s16le"},os.time()*1000) end
+    if log then log.info("airsim.media","start",tostring(ok),tostring(err or ""),tostring(pcm.sample_rate)) end
+    if ok then announce_media("media.open") end
     return ok,err
 end
+
+local function start_uplink_source(call)
+    if not pcm.active then
+        local ok,err=start_media(call)
+        if not ok then return false,err end
+    end
+    local ok,err=pcm:start_uplink_source()
+    if log then
+        local s=pcm:stats()
+        log.info("airsim.media","uplink_source",tostring(ok),tostring(err or ""),s.sample_rate,s.uplink_sample_rate)
+    end
+    if ok then announce_media("media.ready") end
+    return ok,err
+end
+
 local function emit_event(kind,payload)
     if kind=="call.state" and payload and payload.call then
-        if payload.event=="connected" then start_media(payload.call)
-        elseif payload.event=="ended" or payload.event=="failed" or payload.event=="hangup" or payload.event=="reject" or payload.event=="remote_hangup" then stop_media() end
+        if payload.event=="connected" then
+            start_media(payload.call)
+        elseif payload.event=="ended" or payload.event=="failed" or payload.event=="hangup" or
+               payload.event=="reject" or payload.event=="remote_hangup" then
+            stop_media()
+        end
+    elseif kind=="call.audio_start" and payload and payload.call then
+        start_uplink_source(payload.call)
     end
     if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end
 end
@@ -110,7 +175,18 @@ local function save_wifi_config(ssid, password, bssid, security)
 end
 local function handle_relay_message(raw,fin,opcode)
     if tonumber(opcode)==2 then
-        if pcm.active then pcm:push_uplink(raw) end
+        if pcm.active then
+            local ok,err=pcm:push_uplink(raw)
+            if ok then
+                uplink_frames=uplink_frames+1
+                uplink_bytes=uplink_bytes+#raw
+                if log and (uplink_frames==1 or uplink_frames%25==0) then
+                    log.info("airsim.media","uplink",uplink_frames,uplink_bytes,pcm:stats().uplink_pending_bytes)
+                end
+            elseif err~="audio_not_ready" and log then
+                log.warn("airsim.media","uplink_failed",tostring(err or "unknown"))
+            end
+        end
         return
     end
     local msg=json.decode(raw or "")
