@@ -1,0 +1,32 @@
+services:
+  gateway:
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN}"
+      ENROLLMENT_TOKEN: "${ENROLLMENT_TOKEN:?set ENROLLMENT_TOKEN}"
+      DEVICE_CA_CERT: "/data/pki/device-ca.pem"
+      DEVICE_CA_KEY: "/data/pki/device-ca-key.pem"
+      DEVICE_REGISTRY_JSON: "${DEVICE_REGISTRY_JSON:?set DEVICE_REGISTRY_JSON}"
+    expose: ["8080"]
+    volumes:
+      - gateway_data:/data
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [gateway]
+    environment:
+      DOMAIN: "${DOMAIN:?set DOMAIN}"
+      DEVICE_DOMAIN: "${DEVICE_DOMAIN:?set DEVICE_DOMAIN}"
+      ENROLL_DOMAIN: "${ENROLL_DOMAIN:?set ENROLL_DOMAIN}"
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - gateway_data:/data/pki:ro
+volumes:
+  caddy_data:
+  caddy_config:
+  gateway_data:

@@ -1,0 +1,8 @@
+{
+  "name": "airsim-air8000-vps",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { "ble:test": "node ble-test.mjs" },
+  "dependencies": { "ws": "^8.18.0" }
+}

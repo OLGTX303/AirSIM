@@ -1,0 +1,24 @@
+{
+  "protocol_version": "airsim.air8000.v1",
+  "envelope": {
+    "device_id": "air8000-test",
+    "type": "device.heartbeat",
+    "timestamp": 1700000000000,
+    "nonce": "nonce-0001",
+    "canonical": "airsim.air8000.v1|air8000-test|device.heartbeat|1700000000000|nonce-0001|{}"
+  },
+  "hmac": {
+    "secret": "test-only-secret-0123456789",
+    "sha256_hex": "a276bb48c393ad54043f6b6d41ca2d2a1cdd678dd9aa3562010c7f0a4451ffae"
+  },
+  "media_header": {
+    "version": 1,
+    "call_id": "call-test-1",
+    "sequence": 7,
+    "timestamp": 1700000000000,
+    "direction": "rx",
+    "sample_rate": 8000,
+    "frame_duration_ms": 20,
+    "payload_length": 320
+  }
+}

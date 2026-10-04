@@ -1,0 +1,8 @@
+local M = {}
+function M.normalize(id, sender, body, timestamp)
+    assert(type(id)=="string" and #id > 0 and #id <= 128, "invalid message id")
+    assert(type(sender)=="string" and #sender <= 82, "invalid sender")
+    assert(type(body)=="string" and #body <= 4096, "sms too large")
+    return { message_id=id, sender=sender, body=body, timestamp=timestamp or os.time()*1000 }
+end
+return M

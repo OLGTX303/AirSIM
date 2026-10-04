@@ -1,0 +1,1 @@
+{"name":"airsim-air8000-simulator","private":true,"type":"module","scripts":{"test":"node index.mjs --test"}}
