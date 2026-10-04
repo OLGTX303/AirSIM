@@ -109,7 +109,7 @@ function M:push_uplink(payload)
 
     local data=self.pending_uplink..payload
     self.pending_uplink=""
-    local max_pending=math.max(640,math.floor(self.sample_rate*2*MAX_PENDING_MS/1000))
+    local max_pending=math.max(640,math.floor((self.uplink_sample_rate or 16000)*2*MAX_PENDING_MS/1000))
     if #data>max_pending then
         local drop=#data-max_pending
         if drop%2~=0 then drop=drop+1 end
