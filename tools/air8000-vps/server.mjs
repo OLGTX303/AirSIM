@@ -27,7 +27,7 @@ function sameSecret(a, b) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location, wifi:d.wifi, media_rate:d.media_rate || 8000, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location, wifi:d.wifi, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 16000, media_stats:d.media_stats || {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0}, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
 function ensureCA() {
@@ -73,7 +73,7 @@ const server=http.createServer(async (req,res)=>{
     if (req.method === "GET" && u.pathname === "/api/devices") return json(res,200,[...devices.values()].map(publicDevice));
     const match=u.pathname.match(/^\/api\/devices\/([^/]+)\/command$/);
     const mediaMatch=u.pathname.match(/^\/api\/devices\/([^/]+)\/media-ticket$/);
-    if (req.method === "POST" && mediaMatch) { const id=decodeURIComponent(mediaMatch[1]); const d=devices.get(id); if(!d?.socket || d.socket.readyState!==1) return json(res,409,{error:"device offline"}); const ticket=issueMediaTicket(id); const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0]; return json(res,201,{expires_in:60,sample_rate:d.media_rate||8000,ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`}); }
+    if (req.method === "POST" && mediaMatch) { const id=decodeURIComponent(mediaMatch[1]); const d=devices.get(id); if(!d?.socket || d.socket.readyState!==1) return json(res,409,{error:"device offline"}); const ticket=issueMediaTicket(id); const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0]; return json(res,201,{expires_in:60,sample_rate:d.media_rate||8000,downlink_sample_rate:d.media_rate||8000,uplink_sample_rate:d.media_uplink_rate||16000,ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`}); }
     if (req.method === "POST" && match) { const value=await body(req); const id=decodeURIComponent(match[1]); if (!["dial","answer","reject","hangup","dtmf","send_sms","gps_request","wifi_config","wifi_connect","wifi_disconnect"].includes(value.type)) return json(res,400,{error:"unsupported command"}); const commandID=command(id,value.type,value.payload||{}); return commandID ? json(res,202,{accepted:true,command_id:commandID}) : json(res,409,{error:"device offline"}); }
     return json(res,404,{error:"not found"});
   } catch (e) { return json(res,400,{error:e.message}); }
@@ -98,7 +98,25 @@ server.on("upgrade", (req, socket, head) => {
   if (u.pathname !== "/device") return socket.destroy();
   wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
 });
-mediaWss.on("connection",(ws,deviceID)=>{const old=mediaPeers.get(deviceID);if(old)try{old.close(4000,"replaced")}catch{} mediaPeers.set(deviceID,ws);mediaStats.set(deviceID,{up:0,down:0});console.log(`media connected device=${deviceID}`);ws.on("message",raw=>{const s=mediaStats.get(deviceID);if(s)s.up++;const d=devices.get(deviceID);if(d?.socket?.readyState===1)d.socket.send(raw,{binary:true});});ws.on("close",()=>{if(mediaPeers.get(deviceID)===ws)mediaPeers.delete(deviceID);mediaStats.delete(deviceID);console.log(`media disconnected device=${deviceID}`)});});
+mediaWss.on("connection",(ws,deviceID)=>{
+  const old=mediaPeers.get(deviceID); if(old)try{old.close(4000,"replaced")}catch{}
+  mediaPeers.set(deviceID,ws)
+  const stats={uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0,last_activity:Date.now()}
+  mediaStats.set(deviceID,stats)
+  const device=devices.get(deviceID); if(device) device.media_stats=stats
+  console.log(`media connected device=${deviceID}`)
+  ws.on("message",(raw,isBinary)=>{
+    if(!isBinary)return
+    stats.uplink_frames++; stats.uplink_bytes+=raw.length; stats.last_activity=Date.now()
+    if(stats.uplink_frames===1)console.log(`media uplink device=${deviceID} bytes=${raw.length}`)
+    const d=devices.get(deviceID); if(d?.socket?.readyState===1)d.socket.send(raw,{binary:true})
+  })
+  ws.on("close",()=>{
+    if(mediaPeers.get(deviceID)===ws)mediaPeers.delete(deviceID)
+    mediaStats.delete(deviceID)
+    console.log(`media disconnected device=${deviceID}`)
+  })
+});
  wss.on("connection", (ws, req) => {
   let device = null;
   const reject = (reason) => {
@@ -108,16 +126,20 @@ mediaWss.on("connection",(ws,deviceID)=>{const old=mediaPeers.get(deviceID);if(o
   ws.on("message", (raw, isBinary) => {
     try {
         if (isBinary) {
-        const peer = device && mediaPeers.get(device.device_id);
+        if (!device) return reject("binary media before registration");
+        let stats=mediaStats.get(device.device_id);
+        if(!stats) {
+          stats=device.media_stats || {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0,last_activity:Date.now()};
+          device.media_stats=stats;
+        }
+        stats.downlink_frames++; stats.downlink_bytes+=raw.length; stats.last_activity=Date.now();
+        if(stats.downlink_frames===1) console.log(`media downlink device=${device.device_id} bytes=${raw.length}`);
+        const peer=mediaPeers.get(device.device_id);
         if (peer?.readyState === 1) {
-          const s=mediaStats.get(device.device_id);
-          if(s) {
-            s.down++;
-            if(s.down===1) console.log(`media downlink device=${device.device_id} bytes=${raw.length}`);
-          }
-          peer.send(raw, { binary: true });
-        } else if (device) {
-          console.log(`media downlink dropped device=${device.device_id} reason=no_browser_media_peer`);
+          peer.send(raw,{binary:true});
+        } else {
+          stats.dropped_downlink_frames++;
+          if(stats.dropped_downlink_frames===1) console.log(`media downlink dropped device=${device.device_id} reason=no_browser_media_peer`);
         }
         return;
       }
@@ -152,6 +174,8 @@ mediaWss.on("connection",(ws,deviceID)=>{const old=mediaPeers.get(deviceID);if(o
           location: null,
           wifi: null,
           media_rate: 8000,
+          media_uplink_rate: 16000,
+          media_stats: {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0},
           events: [],
           socket: ws,
           last_seen: Date.now(),
@@ -167,7 +191,7 @@ mediaWss.on("connection",(ws,deviceID)=>{const old=mediaPeers.get(deviceID);if(o
       if (msg.type === "device.status" || msg.type === "event.status") device.status = msg.payload || msg.status;
       if (msg.type === "device.wifi" || msg.type === "event.wifi") device.wifi = msg.payload || msg.wifi;
       if (msg.type === "device.command_result" && msg.payload?.payload?.fix_state) device.location = msg.payload.payload;
-      if (msg.type === "media.open") device.media_rate = Number(msg.payload?.sample_rate) || 8000;
+      if (msg.type === "media.open" || msg.type === "media.ready") { device.media_rate = Number(msg.payload?.downlink_sample_rate || msg.payload?.sample_rate) || 8000; device.media_uplink_rate = Number(msg.payload?.uplink_sample_rate) || 16000; }
       if (["call.state", "sms.received", "sms.sent", "device.command_result", "media.open"].includes(msg.type)) {
         device.events = device.events || [];
         device.events.push({ type: msg.type, payload: msg.payload || {}, timestamp: msg.timestamp || Date.now() });
