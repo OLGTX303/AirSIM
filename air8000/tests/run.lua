@@ -92,6 +92,42 @@ ok("direct PCM capability requires raw external source", function()
   assert(not C.probe({cc=cc,audio_v2={}}).direct_pcm)
 end)
 
+ok("media manager prefers real carrier RTP", function()
+  local M=require("media.media_manager")
+  assert(M.select("auto",{carrier_rtp_pcm=true,direct_pcm=true,sip_bridge=true})=="carrier_rtp")
+  assert(M.select("direct_pcm",{carrier_rtp_pcm=true,direct_pcm=true})=="direct_pcm")
+  assert(M.select("auto",{carrier_rtp_pcm=false,direct_pcm=true})=="direct_pcm")
+end)
+
+ok("carrier RTP backend selects native bridge without fake tone", function()
+  local C=require("media.carrier_rtp")
+  local calls={}
+  local cc={
+    AUDIO_MODE_BRIDGE_PCM=1,
+    init=function(id,mode) calls.init={id,mode}; return true end,
+    bridgePcmStats=function() return {selected=true,active=1,media_ready=1} end,
+    bridgeAudioStop=function() calls.bridgeStop=true; return true end,
+  }
+  local voip={
+    AUDIO_MODE_BRIDGE=1, PCMU=0,
+    setAudioMode=function(mode) calls.mode=mode; return true end,
+    on=function(name,cb) calls["on_"..name]=cb end,
+    start=function(opts) calls.start=opts; return true end,
+    stop=function() calls.stop=true; return true end,
+  }
+  local carrier=C.new(cc,voip,{LWIP_STA=7})
+  assert(carrier:init())
+  assert(calls.mode==1 and calls.init[2]==1)
+  assert(carrier:configure({host="192.168.1.10",port=41000,codec="PCMU"}))
+  assert(carrier:start("c1"))
+  assert(calls.start.remote_ip=="192.168.1.10" and calls.start.remote_port==41000)
+  assert(calls.start.codec==0 and calls.start.sample_rate==8000 and calls.start.ptime==20)
+  carrier:on_cc("PLAY",1,123)
+  assert(carrier:stats().early_media==true)
+  carrier:stop(true)
+  assert(calls.stop and calls.bridgeStop)
+end)
+
 ok("location normalization", function()
   local L=require("gnss.location"); local x=L.normalize({lat=1,lng=2,alt=3},99)
   assert(x.fix and x.latitude==1 and x.altitude_m==3); assert(not L.normalize({},99).fix)
