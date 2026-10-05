@@ -41,6 +41,7 @@ function M.snapshot(wlan,cfg,cache,event,data,now)
     if ready and ip then state="connected"
     elseif event=="CONNECTED" then state="associated"
     elseif event=="CONNECTING" then state="connecting"
+    elseif event=="DISCONNECTING" then state="disconnecting"
     elseif event=="DISCONNECTED" or event=="IP_LOSE" then state="disconnected"
     elseif saved.ssid then state="configured"
     else state="unconfigured" end
