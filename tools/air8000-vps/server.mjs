@@ -412,7 +412,7 @@ function playoutCarrierDownlink(session) {
     // wait, so one lost packet costs one 20 ms frame rather than several.
     if(!session.rxMissingSince)session.rxMissingSince=now;
     pcm8=SILENT_PCMU_FRAME;
-    if(session.rxGapOpen || session.rxQueue.size>=session.rxWarmupFrames || now-session.rxMissingSince>=session.rxMissingGraceMs){
+    if(session.rxGapOpen || now-session.rxMissingSince>=session.rxMissingGraceMs){
       stats.rtp_lost_packets++;
       stats.audio_concealment_frames++;
       session.rxGapOpen=true;

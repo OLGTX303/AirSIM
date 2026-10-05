@@ -35,7 +35,7 @@ assert.match(server,/Device-side carrier release is authoritative/);
 assert.doesNotMatch(server,/while\(session\.pendingUplink\.length>=320\)/);
 assert.match(server,/session\.rxQueue\.size>Math\.ceil\(session\.rxHoldMs\/MEDIA_FRAME_MS\)/);
 assert.match(server,/rtp_latency_trim_frames/);
-assert.match(server,/session\.rxGapOpen \|\| session\.rxQueue\.size>=session\.rxWarmupFrames/);
+assert.match(server,/session\.rxGapOpen \|\| now-session\.rxMissingSince>=session\.rxMissingGraceMs/);
 assert.match(server,/parsed\.ssrc!==session\.rxSsrc/);
 assert.match(server,/rtp_stream_resets/);
 assert.match(server,/txPrimeFrames:3/);
