@@ -556,9 +556,23 @@ mediaWss.on("connection",(ws,deviceID)=>{
         device.media_uplink_rate=Number(msg.payload?.uplink_sample_rate) || (rtpMediaEnabled(device)?8000:16000);
         if(msg.payload?.backend)device.media_backend=msg.payload.backend;
         if(msg.payload?.transport)device.media_transport=msg.payload.transport;
+        if(Number(msg.payload?.cellular_sample_rate)>0){
+          device.cellular_voice_rate=Number(msg.payload.cellular_sample_rate);
+          device.wideband_volte=device.cellular_voice_rate>=16000;
+          device.voice_codec=msg.payload?.cellular_codec || (device.wideband_volte?"AMR-WB":"AMR-NB");
+        }
+      }
+      if (msg.type === "media.voice_quality") {
+        const rate=Number(msg.payload?.cellular_sample_rate)||0;
+        if(rate>0){
+          device.cellular_voice_rate=rate;
+          device.wideband_volte=msg.payload?.wideband_volte===true || rate>=16000;
+          device.voice_codec=msg.payload?.voice_codec || (device.wideband_volte?"AMR-WB":"AMR-NB");
+          device.status={...(device.status||{}),cellular_voice_rate:rate,wideband_volte:device.wideband_volte,voice_codec:device.voice_codec};
+        }
       }
       if (msg.type === "media.rtp_config.ack") device.rtp_ready = msg.payload?.ok === true;
-      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase"].includes(msg.type)) {
+      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase", "media.voice_quality"].includes(msg.type)) {
         device.events = device.events || [];
         device.events.push({ type: msg.type, payload: msg.payload || {}, timestamp: msg.timestamp || Date.now() });
         if (device.events.length > 100) device.events.shift();
