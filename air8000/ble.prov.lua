@@ -1,6 +1,7 @@
 -- AirSIM BLE Wi-Fi provisioning for Air8000.
 -- The service/characteristic UUIDs are intentionally fixed so the mobile app
 -- can reject unrelated Bluetooth devices before showing a configuration UI.
+local wifi_status=require("system.wifi_status")
 local M = {}
 
 M.SERVICE_UUID = "7B9E8000A8F04C4E9A5B4B80C8000001"
@@ -46,6 +47,7 @@ function M.start(cfg, identity, wlan_api, kv_api)
     end
 
     local status_payload = safe_status(cfg, identity)
+    local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
     local ble_device
     local gatt
     local adv
@@ -67,14 +69,17 @@ function M.start(cfg, identity, wlan_api, kv_api)
         return wlan_api.connect(ssid, password, 1)
     end
 
-    local function publish_status(state, error_message)
-        status_payload = json.encode({
-            protocol = "airsim.ble.provisioning.v1",
-            wifi = { configured = cfg.wifi and cfg.wifi.ssid ~= nil, state = state, error = error_message },
-            ble = { state = ble_state }
+    local function publish_status(state,error_message,event,data)
+        local snap=wifi_status.snapshot(wlan_api,cfg,wifi_cache,event,data,os.time()*1000)
+        if state then snap.state=state end
+        snap.error=error_message
+        status_payload=json.encode({
+            protocol="airsim.ble.provisioning.v1",
+            wifi=snap,
+            ble={state=ble_state}
         })
         if connected and ble_device then
-            ble_device:write_notify({uuid_service=string.fromHex(M.SERVICE_UUID), uuid_characteristic=string.fromHex(M.STATUS_UUID)}, status_payload)
+            ble_device:write_notify({uuid_service=string.fromHex(M.SERVICE_UUID),uuid_characteristic=string.fromHex(M.STATUS_UUID)},status_payload)
         end
     end
 
@@ -146,7 +151,7 @@ function M.start(cfg, identity, wlan_api, kv_api)
             connected = true
             ble_state = "connected"
             if log then log.info("airsim.ble", "connected") end
-            publish_status("connected")
+            publish_status(nil,nil,"BLE_CONNECTED")
             device:write_value({uuid_service=string.fromHex(M.SERVICE_UUID), uuid_characteristic=string.fromHex(M.IDENTITY_UUID)}, json.encode({serial_number=identity.serial_number, imei=identity.imei, device_id=cfg.device_id}))
         elseif event == ble.EVENT_DISCONN then
             connected = false
@@ -193,10 +198,16 @@ function M.start(cfg, identity, wlan_api, kv_api)
             end, 1000)
         end
     end, 1000)
-    sys.subscribe("WLAN_STA_INC", function(event)
-        if event == "CONNECTED" then publish_status("connected") elseif event == "DISCONNECTED" then publish_status("disconnected") end
+    sys.subscribe("WLAN_STA_INC",function(event,data)
+        publish_status(nil,nil,event,data)
     end)
-    sys.subscribe("WLAN_SCAN_DONE", publish_scan_results)
+    sys.subscribe("IP_READY",function()
+        if wlan_api.ready and wlan_api.ready() then publish_status(nil,nil,"IP_READY") end
+    end)
+    sys.subscribe("IP_LOSE",function()
+        if not (wlan_api.ready and wlan_api.ready()) then publish_status(nil,nil,"IP_LOSE") end
+    end)
+    sys.subscribe("WLAN_SCAN_DONE",publish_scan_results)
     publish_status("ready")
     return true
 end
