@@ -111,10 +111,37 @@ export class SipUdpServer {
     return [...this.registrations.values()].find(item => item.device_id === deviceId) || null;
   }
 
+  call(deviceId) {
+    return this.deviceCalls.get(deviceId) || null;
+  }
+
+  forget(deviceId) {
+    const call=this.deviceCalls.get(deviceId);
+    if(!call)return false;
+    this.calls.delete(call.callId);
+    this.deviceCalls.delete(deviceId);
+    return true;
+  }
+
   async invite(device, number, session) {
+    return this.#invite(device, number, session, false);
+  }
+
+  async resume(device, session) {
+    return this.#invite(device, "", session, true);
+  }
+
+  async #invite(device, number, session, resume) {
     if (!device?.device_id || !session) throw Error("device and RTP session are required");
     const registration = this.registration(device.device_id);
     if (!registration) throw Error("device SIP registration not found");
+
+    // A replacement dialog intentionally forgets stale gateway state without
+    // sending BYE. The Air8000 resume header tells the device to attach this
+    // SIP media leg to its existing cellular call rather than dial again.
+    if (resume) this.forget(device.device_id);
+    else if (this.call(device.device_id)) throw Error("device already has an active SIP call");
+
     const callId = compactCallId();
     const branch = `z9hG4bK-${crypto.randomBytes(8).toString("hex")}`;
     const fromTag = crypto.randomBytes(6).toString("hex");
@@ -123,7 +150,7 @@ export class SipUdpServer {
     const requestUri = registration.contact || `sip:${registration.username}@${registration.address}:${registration.port}`;
     const body = sdpOffer(this.advertiseHost, session.port);
     const call = {
-      device_id: device.device_id, number: String(number || ""), session,
+      device_id: device.device_id, number: String(number || ""), session, resume:!!resume,
       callId, branch, fromTag, from, to, requestUri,
       remote: { address: registration.address, port: registration.port },
       cseq: 1, state: "INVITING", established: false,
@@ -135,10 +162,11 @@ export class SipUdpServer {
       ["Max-Forwards", "70"], ["From", from], ["To", to], ["Call-ID", callId],
       ["CSeq", `${call.cseq} INVITE`], ["Contact", `<sip:gateway@${this.advertiseHost}:${this.port}>`],
       ["Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS"], ["Supported", "100rel"],
-      ["X-AirSIM-Number", call.number], ["Content-Type", "application/sdp"],
+      resume ? ["X-AirSIM-Resume", "1"] : ["X-AirSIM-Number", call.number],
+      ["Content-Type", "application/sdp"],
     ], body);
-    this.onState({ type: "dial", ...call });
-    return { command_id: callId };
+    this.onState({ type: resume ? "resume" : "dial", ...call });
+    return { command_id: callId, resumed:!!resume };
   }
 
   hangup(deviceId) {
