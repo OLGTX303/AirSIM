@@ -9,7 +9,12 @@ services:
       DEVICE_CA_CERT: "/data/pki/device-ca.pem"
       DEVICE_CA_KEY: "/data/pki/device-ca-key.pem"
       DEVICE_REGISTRY_JSON: "${DEVICE_REGISTRY_JSON:?set DEVICE_REGISTRY_JSON}"
+      RTP_PUBLIC_HOST: "${RTP_PUBLIC_HOST:?set RTP_PUBLIC_HOST}"
+      RTP_PORT_BASE: "${RTP_PORT_BASE:-41000}"
+      RTP_PORT_COUNT: "${RTP_PORT_COUNT:-64}"
     expose: ["8080"]
+    ports:
+      - "41000-41063:41000-41063/udp"
     volumes:
       - gateway_data:/data
   caddy:
