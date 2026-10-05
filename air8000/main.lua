@@ -1,4 +1,4 @@
-PROJECT="airsim-air8000"; VERSION="001.002.000"
+PROJECT="airsim-air8000"; VERSION="001.002.001"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
@@ -391,6 +391,11 @@ local function start_uplink_source(call)
 end
 
 local function emit_event(kind,payload)
+    if kind=="call.state" then
+        local ended=payload and (payload.event=="ended" or payload.event=="failed" or payload.event=="hangup" or
+            payload.event=="reject" or payload.event=="remote_hangup" or payload.event=="disconnected")
+        status.active_call=ended and nil or (payload and payload.call or status.active_call)
+    end
     if kind=="call.state" and payload and payload.call then
         if media_backend=="carrier_rtp" then
             -- Start the native CC<->VoIP RTP bridge before cc.dial()/cc.accept()
@@ -442,10 +447,30 @@ _G.call_service=call_module.new(cc,emit_event)
 _G.sms_service=sms_module.new(sms,function(kind,payload) if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end end,cfg.limits and cfg.limits.max_sms_body)
 _G.gnss_service=gnss_module.new(gnss_api,cfg.location_policy)
 
+local sip_refreshing=false
+local last_sip_server_instance=nil
+
 if media_backend=="sip_bridge" and exsip then
     exsip.on(function(event_type,action,payload)
         if event_type=="call" and action=="incoming" then
             local headers=type(payload) == "table" and payload.headers or {}
+            local resume=headers and tostring(headers["x-airsim-resume"] or "")=="1"
+            if resume then
+                local current=_G.call_service and _G.call_service.current
+                if not current then
+                    pcall(exsip.fail,481,"No cellular call to resume")
+                    return
+                end
+                if log then log.info("airsim.sip","resume_existing_cc",tostring(current.state or "")) end
+                if tostring(current.state or "")=="CONNECTED" then
+                    pcall(exsip.accept)
+                    if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"sip_resume") end
+                else
+                    pcall(exsip.progress)
+                    set_bridge_tone(true,"sip_resume_progress")
+                end
+                return
+            end
             local number=headers and (headers["x-airsim-number"] or headers["x-air8000-number"])
             if type(number)~="string" or number=="" then
                 pcall(exsip.fail,400,"Missing cellular destination")
@@ -472,7 +497,9 @@ if media_backend=="sip_bridge" and exsip then
                 set_bridge_tone(true,"voip_started")
             end
         elseif event_type=="call" and (action=="ended" or action=="failed") then
-            if _G.call_service.current then pcall(_G.call_service.hangup) end
+            -- During a gateway-instance refresh the SIP dialog is intentionally
+            -- replaced while the cellular call remains alive.
+            if not sip_refreshing and _G.call_service.current then pcall(_G.call_service.hangup) end
         elseif event_type=="error" and log then
             log.warn("airsim.sip", "event_error")
         end
@@ -519,6 +546,21 @@ end
 
 local function run_async(fn)
     if sys and sys.taskInit then sys.taskInit(fn) else fn() end
+end
+
+local function refresh_sip_registration(reason)
+    if media_backend~="sip_bridge" or not exsip or sip_refreshing then return false end
+    sip_refreshing=true
+    run_async(function()
+        disable_bridge_tone("sip_refresh")
+        if log then log.warn("airsim.sip","refresh_start",tostring(reason or "")) end
+        pcall(exsip.stop)
+        if sys and sys.wait then sys.wait(150) end
+        local ok,result=pcall(exsip.start)
+        sip_refreshing=false
+        if log then log.info("airsim.sip","refresh_done",tostring(ok and result~=false),tostring(reason or "")) end
+    end)
+    return true
 end
 
 local function handle_gps_request(message_id)
@@ -590,7 +632,15 @@ local function handle_relay_message(raw,fin,opcode)
     local msg=json.decode(raw or "")
     if type(msg) ~= "table" or type(msg.type) ~= "string" then return end
     local p=msg.payload or {}; local id=msg.message_id
-    if msg.type == "device.register.ack" then return end
+    if msg.type == "device.register.ack" then
+        local instance=msg.server_instance_id or p.server_instance_id
+        if media_backend=="sip_bridge" and type(instance)=="string" and instance~="" and instance~=last_sip_server_instance then
+            local previous=last_sip_server_instance
+            last_sip_server_instance=instance
+            refresh_sip_registration(previous and "gateway_restarted" or "gateway_sync")
+        end
+        return
+    end
     if msg.type == "media.rtp_config" then
         if media_backend~="carrier_rtp" then return end
         local ok,err=carrier_rtp:configure(p)
@@ -689,6 +739,7 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
                 status.wifi_state=status.wifi.state
                 status.gnss_state=_G.gnss_service and _G.gnss_service.state or status.gnss_state
                 status.location=_G.gnss_service and _G.gnss_service.last or status.location
+                status.active_call=_G.call_service and _G.call_service.current or nil
                 _G.relay_client:register(status)
                 publish_wifi("REGISTER")
                 if status.location then publish_location(status.location) end
