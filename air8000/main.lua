@@ -15,6 +15,7 @@ local sms_module=require("cellular.sms")
 local pcm_module=require("media.direct_pcm")
 local carrier_rtp_module=require("media.carrier_rtp")
 local media_manager=require("media.media_manager")
+local media_phase_module=require("media.phase")
 local exsip=nil
 do
     local ok,module=pcall(require,"exsip")
@@ -94,6 +95,16 @@ local media_bytes=0
 local uplink_frames=0
 local uplink_bytes=0
 local downlink_pending=""
+local media_phase=media_phase_module.new(function(next_state,previous,reason)
+    status.media_phase=next_state
+    if media_backend=="sip_bridge" then
+        status.media_transport=next_state==media_phase_module.DIRECT_PCM_CONNECTED and "direct_pcm" or "sip_rtp"
+        status.media_rate=next_state==media_phase_module.DIRECT_PCM_CONNECTED and (pcm.sample_rate or 8000) or 8000
+        status.media_uplink_rate=status.media_rate
+    end
+    if log then log.info("airsim.media","phase",next_state,"from",previous,"reason",tostring(reason or "")) end
+end)
+status.media_phase=media_phase_module.IDLE
 
 local bridge_tone_active=false
 local bridge_tone_generation=0
@@ -269,6 +280,7 @@ end
 
 init_cc_backend()
 
+local handoff_generation=0
 local function stop_media(finalize_cc)
     if media_backend=="carrier_rtp" then
         carrier_rtp:stop(finalize_cc==true)
@@ -278,13 +290,33 @@ local function stop_media(finalize_cc)
     downlink_pending=""
     uplink_frames=0
     uplink_bytes=0
+    if media_backend=="sip_bridge" then
+        handoff_generation=handoff_generation+1
+        if media_phase.state~=media_phase_module.IDLE then
+            if media_phase.state~=media_phase_module.ENDING then media_phase:transition(media_phase_module.ENDING,"call_end") end
+            media_phase:transition(media_phase_module.IDLE,"call_end")
+        end
+        if cc and type(cc.setBridge)=="function" then pcall(cc.setBridge,true) end
+        if _G.relay_client then
+            local rate=cellular_voice_rate()
+            if rate~=16000 then rate=8000 end
+            _G.relay_client:send("media.transport_change",{
+                call_id=_G.call_service and _G.call_service.current and _G.call_service.current.call_id or nil,
+                from="direct_pcm",to="sip_rtp",backend="sip_bridge",phase="IDLE",
+                sample_rate=8000,downlink_sample_rate=8000,uplink_sample_rate=8000,
+                channels=1,bits=16,frame_duration_ms=20,frame_bytes=320,
+                wideband=false,cellular_codec=rate==16000 and "AMR-WB" or "AMR-NB",
+                reason="call_end",
+            },os.time()*1000)
+        end
+    end
 end
 
 local function send_downlink(payload)
     if media_backend~="direct_pcm" then return end
     if type(payload)~="string" or #payload==0 or not _G.relay_transport then return end
     downlink_pending=downlink_pending..payload
-    local frame_bytes=pcm.sample_rate==16000 and 1280 or 640
+    local frame_bytes=math.floor((pcm.sample_rate or 8000)*2*20/1000)
     while #downlink_pending>=frame_bytes do
         local frame=downlink_pending:sub(1,frame_bytes)
         downlink_pending=downlink_pending:sub(frame_bytes+1)
@@ -305,6 +337,71 @@ local function send_downlink(payload)
             break
         end
     end
+end
+
+local function announce_direct_transport(reason)
+    local rate=pcm.sample_rate or cellular_voice_rate() or 8000
+    local frame_bytes=math.floor(rate*2*20/1000)
+    if _G.relay_client then
+        _G.relay_client:send("media.transport_change",{
+            call_id=_G.call_service and _G.call_service.current and _G.call_service.current.call_id or nil,
+            from="sip_rtp", to="direct_pcm", backend="direct_pcm",
+            sample_rate=rate, downlink_sample_rate=rate, uplink_sample_rate=rate,
+            channels=1, bits=16, frame_duration_ms=20, frame_bytes=frame_bytes,
+            wideband=rate==16000, cellular_codec=rate==16000 and "AMR-WB" or "AMR-NB",
+            reason=reason,
+        },os.time()*1000)
+    end
+end
+
+local start_direct_media
+local start_uplink_source
+local function restore_sip_media(reason)
+    if cc and type(cc.setBridge)=="function" then pcall(cc.setBridge,true) end
+    if exsip and type(exsip.start_media)=="function" then
+        local ok,result=pcall(exsip.start_media)
+        if log then log.info("airsim.media","sip_media_restore",tostring(ok and result),tostring(reason or "")) end
+    end
+end
+
+local function switch_to_direct_pcm(call,trigger)
+    if media_backend~="sip_bridge" or not call then return false,"not_sip_bridge" end
+    if media_phase:is(media_phase_module.DIRECT_PCM_CONNECTED) or
+       media_phase:is(media_phase_module.SWITCHING_TO_DIRECT_PCM) then return true end
+    if not media_phase:is(media_phase_module.SIP_EARLY_MEDIA) and
+       not media_phase:is(media_phase_module.DIALING) then return false,"invalid_handoff_phase" end
+    if type(cc)~="table" or type(cc.setBridge)~="function" then return false,"cc_setBridge_unavailable" end
+    local changed,err=media_phase:transition(media_phase_module.SWITCHING_TO_DIRECT_PCM,trigger)
+    if not changed then return false,err end
+    handoff_generation=handoff_generation+1
+    local generation=handoff_generation
+    disable_bridge_tone("direct_pcm_handoff")
+    local route_ok,route_result=pcall(cc.setBridge,false)
+    if not route_ok or route_result==false then
+        if log then log.warn("airsim.media","handoff_failed","cc.setBridge",tostring(route_result)) end
+        media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"handoff_failed")
+        return false,"cc_setBridge_false_failed"
+    end
+    if exsip and type(exsip.stop_media)=="function" then pcall(exsip.stop_media) end
+    local function finish()
+        if generation~=handoff_generation then return end
+        local ok,reason=start_direct_media(call)
+        if ok then ok,reason=start_uplink_source(call) end
+        if ok then
+            media_phase:transition(media_phase_module.DIRECT_PCM_CONNECTED,"handoff_complete")
+            announce_direct_transport(trigger)
+            if log then log.info("airsim.media","direct_pcm_start","rate",pcm.sample_rate,"frame_bytes",pcm:stats().frame_bytes or 0,"frame_ms",20) end
+        else
+            if log then log.warn("airsim.media","handoff_failed",tostring(reason or "direct_pcm_failed")) end
+            if pcm.active then pcm:stop() end
+            restore_sip_media("handoff_failed")
+            media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"handoff_failed")
+        end
+    end
+    if sys and sys.taskInit then
+        sys.taskInit(function() if sys.wait then sys.wait(100) end; finish() end)
+    else finish() end
+    return true
 end
 
 local function current_media_stats()
@@ -353,7 +450,7 @@ local function announce_media(kind)
     },os.time()*1000)
 end
 
-local function start_direct_media(call)
+start_direct_media=function(call)
     if pcm.active then return true end
     if not _G.relay_transport or not _G.relay_transport.send_binary then
         return false,"media_transport_unavailable"
@@ -367,7 +464,7 @@ local function start_direct_media(call)
         if is_dl then send_downlink(payload) end
     end)
     if log then log.info("airsim.media","start_direct",tostring(ok),tostring(err or ""),tostring(pcm.sample_rate)) end
-    if ok then announce_media("media.open") end
+    if ok and media_backend~="sip_bridge" then announce_media("media.open") end
     return ok,err
 end
 
@@ -378,7 +475,7 @@ local function start_carrier_media(call)
     return ok,err
 end
 
-local function start_uplink_source(call)
+start_uplink_source=function(call)
     if media_backend=="carrier_rtp" then
         if not carrier_rtp.active then return start_carrier_media(call) end
         return true
@@ -392,7 +489,7 @@ local function start_uplink_source(call)
         local s=pcm:stats()
         log.info("airsim.media","uplink_source",tostring(ok),tostring(err or ""),s.sample_rate,s.uplink_sample_rate)
     end
-    if ok then announce_media("media.ready") end
+    if ok and media_backend~="sip_bridge" then announce_media("media.ready") end
     return ok,err
 end
 
@@ -416,13 +513,17 @@ local function emit_event(kind,payload)
             -- SIP owns the VoIP media engine.  CC remains the cellular leg:
             -- send 200/ACK only after the carrier reports connected, and tear
             -- down both legs when either side ends.
-            if payload.event=="connected" then
+            if payload.event=="dial" then
+                media_phase:transition(media_phase_module.DIALING,"dial")
+            elseif payload.event=="connected" then
+                media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"cellular_connected")
                 disable_bridge_tone("cellular_connected")
                 if exsip then pcall(exsip.accept) end
                 if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"connected") end
             elseif payload.event=="failed" or payload.event=="hangup" or
                    payload.event=="reject" or payload.event=="remote_hangup" or payload.event=="ended" then
                 disable_bridge_tone("call_end")
+                if media_phase:is(media_phase_module.DIRECT_PCM_CONNECTED) then stop_media(true) end
                 if exsip then pcall(exsip.hangUp) end
             end
         else
@@ -434,15 +535,11 @@ local function emit_event(kind,payload)
             end
         end
     elseif kind=="call.audio_start" and payload and payload.call then
-        -- In stock CC<->SIP bridge mode the modem/VoIP C layer owns both
-        -- directions. Starting the legacy direct_pcm source here races the
-        -- bridge and produces "cc is not true start"/extern_source_failed.
         if media_backend~="sip_bridge" then
             start_uplink_source(payload.call)
         else
-            disable_bridge_tone("audio_start")
             if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"audio_start") end
-            if log then log.info("airsim.media","sip_bridge_audio_start") end
+            switch_to_direct_pcm(payload.call,payload.event or "audio_start")
         end
     elseif kind=="call.media" and media_backend=="carrier_rtp" then
         announce_media(payload.event=="play" and "media.early" or "media.phase")
@@ -491,6 +588,7 @@ if media_backend=="sip_bridge" and exsip then
                 pcall(exsip.fail,486,tostring(err or "Cellular line busy"))
             end
         elseif event_type=="media" and action=="ready" then
+            media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"sip_media_ready")
             announce_media("media.open")
             -- A gateway resume re-opens SIP media on an already CONNECTED
             -- cellular call. Ringback must never be mixed into live speech.
@@ -756,7 +854,8 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
                 publish_wifi("REGISTER")
                 if status.location then publish_location(status.location) end
             end,function(reason)
-                stop_media(false)
+                local active=_G.call_service and _G.call_service.current
+                if not active then stop_media(false) end
                 _G.relay_transport=nil
                 _G.relay_client=nil
                 if log then log.warn("airsim.relay","disconnected",tostring(reason or "unknown")) end
@@ -775,7 +874,9 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
                     while transport.connected do sys.wait(1000) end
                 end
             end
-            transport:close(); stop_media(false); _G.relay_transport=nil; _G.relay_client=nil; sys.wait(backoff:next())
+            transport:close()
+            if not (_G.call_service and _G.call_service.current) then stop_media(false) end
+            _G.relay_transport=nil; _G.relay_client=nil; sys.wait(backoff:next())
         end
     end)
 end

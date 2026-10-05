@@ -42,7 +42,7 @@ function sameSecret(a, b) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, media_backend:d.media_backend || d.status?.media_backend || null, media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp" || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), media_recovery_count:d.media_recovery_count||0, server_instance_id:SERVER_INSTANCE_ID, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, media_backend:d.media_backend || d.status?.media_backend || null, media_phase:d.media_phase || d.status?.media_phase || "IDLE", media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp" || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), media_recovery_count:d.media_recovery_count||0, server_instance_id:SERVER_INSTANCE_ID, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
 function emptyMediaStats() {
@@ -103,7 +103,8 @@ function carrierRtpEnabled(device) {
 function sipBridgeEnabled(device) {
   return !!(device && (device.media_backend==="sip_bridge" || device.status?.media_backend==="sip_bridge"));
 }
-function rtpMediaEnabled(device) { return carrierRtpEnabled(device) || sipBridgeEnabled(device); }
+function nativePcmEnabled(device) { return device?.media_transport === "direct_pcm" || device?.media_transport === "wideband_pcm"; }
+function rtpMediaEnabled(device) { return !nativePcmEnabled(device) && (carrierRtpEnabled(device) || sipBridgeEnabled(device)); }
 function activeCellularCall(device) {
   const call=device?.status?.active_call;
   if(!call || typeof call!=="object")return null;
@@ -556,15 +557,17 @@ const server=http.createServer(async (req,res)=>{
       }
       const ticket=issueMediaTicket(id);
       const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0];
+      const direct=nativePcmEnabled(d);
+      const browserRate=direct ? (d.media_rate||8000) : (rtpMediaEnabled(d)?16000:(d.media_rate||8000));
       return json(res,201,{
         expires_in:60,
-        sample_rate:rtpMediaEnabled(d)?16000:(d.media_rate||8000),
-        downlink_sample_rate:rtpMediaEnabled(d)?16000:(d.media_rate||8000),
+        sample_rate:browserRate,
+        downlink_sample_rate:browserRate,
         // SIP/RTP remains PCMU/8000. The browser leg is PCM16/16000;
         // server-side resampling keeps both media contracts explicit.
-        uplink_sample_rate:rtpMediaEnabled(d)?16000:(d.media_uplink_rate||16000),
-        browser_sample_rate:rtpMediaEnabled(d)?16000:(d.media_rate||16000),
-        transport:rtpMediaEnabled(d)?(carrierRtpEnabled(d)?"carrier_rtp":"sip_rtp"):"websocket_pcm",
+        uplink_sample_rate:browserRate,
+        browser_sample_rate:browserRate,
+        transport:direct?"direct_pcm":rtpMediaEnabled(d)?(carrierRtpEnabled(d)?"carrier_rtp":"sip_rtp"):"websocket_pcm",
         real_early_media:carrierRtpEnabled(d) || sipBridgeEnabled(d),
         ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`
       });
@@ -696,7 +699,8 @@ mediaWss.on("connection",(ws,deviceID)=>{
           location: identity.status?.location || null,
           wifi: identity.status?.wifi || null,
           media_backend: identity.status?.media_backend || null,
-          media_transport: identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : identity.status?.media_backend === "sip_bridge" ? "sip_rtp" : "websocket_pcm",
+          media_phase: identity.status?.media_phase || "IDLE",
+          media_transport: identity.status?.media_transport || (identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : identity.status?.media_backend === "sip_bridge" ? "sip_rtp" : "websocket_pcm"),
           media_rate: 8000,
           media_uplink_rate: identity.status?.media_backend === "carrier_rtp" || identity.status?.media_backend === "sip_bridge" ? 8000 : 16000,
           media_stats: emptyMediaStats(),
@@ -742,6 +746,24 @@ mediaWss.on("connection",(ws,deviceID)=>{
           device.voice_codec=msg.payload?.cellular_codec || (device.wideband_volte?"AMR-WB":"AMR-NB");
         }
       }
+      if (msg.type === "media.transport_change") {
+        const p=msg.payload || {};
+        const rate=Number(p.sample_rate || p.downlink_sample_rate);
+        if(rate!==8000 && rate!==16000) throw Error("invalid media sample rate");
+        if(Number(p.frame_bytes)!==rate*2*20/1000) throw Error("invalid media frame size");
+        device.media_phase=p.phase || (p.to==="direct_pcm"?"DIRECT_PCM_CONNECTED":"IDLE");
+        device.media_transport=String(p.to||"") || device.media_transport;
+        device.media_rate=rate;
+        device.media_uplink_rate=Number(p.uplink_sample_rate)||rate;
+        device.cellular_voice_rate=rate;
+        device.wideband_volte=p.wideband===true && rate===16000;
+        device.voice_codec=p.cellular_codec || (device.wideband_volte?"AMR-WB":"AMR-NB");
+        device.rtp_ready=false;
+        const session=rtpSessions.get(device.device_id);
+        if(session && p.from==="sip_rtp") resetRtpSession(session);
+        const peer=mediaPeers.get(device.device_id);
+        if(peer?.readyState===1) peer.send(JSON.stringify({type:"media.transport_change",payload:{...p,sample_rate:rate,frame_bytes:rate*2*20/1000}}));
+      }
       if (msg.type === "call.state") {
         const event=String(msg.payload?.event||"");
         const call=msg.payload?.call;
@@ -767,7 +789,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
         }
       }
       if (msg.type === "media.rtp_config.ack") device.rtp_ready = msg.payload?.ok === true;
-      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase", "media.voice_quality"].includes(msg.type)) {
+      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase", "media.voice_quality", "media.transport_change"].includes(msg.type)) {
         device.events = device.events || [];
         device.events.push({ type: msg.type, payload: msg.payload || {}, timestamp: msg.timestamp || Date.now() });
         if (device.events.length > 100) device.events.shift();

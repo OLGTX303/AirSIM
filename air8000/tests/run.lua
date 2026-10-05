@@ -75,12 +75,25 @@ ok("direct PCM maps remote downlink buffers and clears them", function()
   assert(created[1].data=="LOCAL")
   assert(pcm:start_uplink_source())
   local last=extern_args[#extern_args]
-  assert(last[1]==true and last[2]==true and last[3]==77 and last[5]==16000 and last[6]==16 and last[7]==1 and last[8]==true)
+  assert(last[1]==true and last[2]==true and last[3]==77 and last[5]==8000 and last[6]==16 and last[7]==1 and last[8]==true)
+  assert(pcm:stats().frame_bytes==320 and pcm:stats().uplink_sample_rate==8000)
   assert(pcm:push_uplink("abcd"))
   local input=input_args[#input_args]
   assert(input[1]==true and input[2]=="abcd" and input[3]==false)
   pcm:stop()
   _G.zbuff,_G.audio_v2=old_zbuff,old_audio
+end)
+
+ok("media phase state machine", function()
+  local P=require("media.phase")
+  local p=P.new()
+  assert(p:transition(P.DIALING,"dial"))
+  assert(p:transition(P.SIP_EARLY_MEDIA,"ready"))
+  assert(p:transition(P.SWITCHING_TO_DIRECT_PCM,"audio_start"))
+  assert(p:transition(P.DIRECT_PCM_CONNECTED,"complete"))
+  assert(not p:transition(P.DIALING,"duplicate"))
+  assert(p:transition(P.ENDING,"hangup"))
+  assert(p:transition(P.IDLE,"ended"))
 end)
 
 ok("direct PCM capability requires raw external source", function()

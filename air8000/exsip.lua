@@ -133,6 +133,7 @@ local g_started = false
 local g_registered = false
 local g_callbacks = {}
 local g_current_call = nil
+local g_current_media_session = nil
 -- 本次 VoIP 是否由 exaudio 建立本地 audio_v2 收发链路。
 local g_voip_uses_exaudio = false
 -- 媒体准备任务可被 CANCEL / 挂断 / 断网取消；C start 已受理也属于占用。
@@ -656,10 +657,12 @@ local function sip_event_handler(event, action, payload)
             reset_call_record_state()
             emit_callback("call", "ended", payload)
             g_current_call = nil
+            g_current_media_session = nil
         end
     elseif event == "media" then
         if action == "ready" then
             local session = payload.session or payload
+            g_current_media_session = session
             log_info("media ready", session.remote_ip, session.remote_port, session.codec)
             emit_callback("media", "ready", session)
         elseif action == "stop" then
@@ -1015,10 +1018,29 @@ function exsip.stop()
     g_started = false
     g_registered = false
     g_current_call = nil
+    g_current_media_session = nil
     g_current_adapter = nil
     g_ready_adapters = {}
     reset_call_record_state()
     log_info("stopped")
+end
+
+-- Stop only VoIP media while keeping SIP registration and the current dialog
+-- alive.  The hybrid CC path uses this before starting cc.record().
+function exsip.stop_media()
+    if not g_started then return false end
+    stop_voip_engine()
+    return true
+end
+
+-- Restart the current SIP media session without creating a new SIP dialog.
+-- This is used when the stock CC handoff is rejected and SIP audio must be
+-- restored without redialing the cellular call.
+function exsip.start_media()
+    if not g_started or not g_current_media_session then return false end
+    if g_media_pending or g_media_requested then return true end
+    start_voip_engine(g_current_media_session)
+    return g_media_requested or g_media_pending
 end
 
 --[[
@@ -1118,6 +1140,7 @@ function exsip.hangUp()
     end
 
     stop_voip_engine()
+    g_current_media_session = nil
     sipclient.hangup()
     log_info("hanging up")
     return true

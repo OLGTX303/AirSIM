@@ -93,6 +93,12 @@ async function refresh(){
   }
 }
 function voiceStatus(text){voiceStatusText=text;const el=document.querySelector('#voice-status');if(el)el.textContent=text}
+function applyVoiceRate(downlink,uplink){
+  voice.downlinkRate=Number(downlink)===16000?16000:8000;
+  voice.uplinkRate=Number(uplink)===16000?16000:8000;
+  voice.micResampler=null;voice.playResampler=null;resetPlaybackQueue();
+  if(voice.micLowPass)voice.micLowPass.frequency.value=voice.uplinkRate===16000?7000:3400;
+}
 // Streaming area-average decimator for the microphone (e.g. 48k/44.1k -> 16k).
 // The fractional position carries across ScriptProcessor blocks, so the
 // output rate is exact (1024/3 is not an integer) and blocks join seamlessly.
@@ -224,8 +230,7 @@ async function openMediaSocket(deviceID,reconnecting=false){
   const token=++voice.socketGeneration;
   const ticket=await api('/api/devices/'+encodeURIComponent(deviceID)+'/media-ticket',{method:'POST'});
   if(!voice.wantActive||token!==voice.socketGeneration)throw Error('voice session changed');
-  voice.downlinkRate=Number(ticket.downlink_sample_rate||ticket.sample_rate)===16000?16000:8000;
-  voice.uplinkRate=Number(ticket.uplink_sample_rate)===16000?16000:8000;
+  applyVoiceRate(ticket.downlink_sample_rate||ticket.sample_rate,ticket.uplink_sample_rate||ticket.sample_rate);
   voice.ticket=ticket;
   voice.pending=new Int16Array(0);
   voice.micResampler=null;
@@ -259,6 +264,14 @@ async function openMediaSocket(deviceID,reconnecting=false){
         reconnecting=false;
       }
       try{await playPcm(data)}catch(err){voiceStatus('Speaker error: '+err.message)}
+    } else if(typeof data==='string') {
+      try {
+        const message=JSON.parse(data),p=message.payload||{};
+        if(message.type==='media.transport_change') {
+          applyVoiceRate(p.downlink_sample_rate||p.sample_rate,p.uplink_sample_rate||p.sample_rate);
+          voiceStatus('Connected voice · '+voice.downlinkRate+' Hz · '+(p.wideband?'WIDEBAND':'NARROWBAND')+' · direct PCM');
+        }
+      } catch {}
     }
   };
   ws.onerror=()=>{};
@@ -341,7 +354,7 @@ async function startVoice(){
     voice.micHighPass=voice.ctx.createBiquadFilter();
     voice.micHighPass.type='highpass';voice.micHighPass.frequency.value=80;voice.micHighPass.Q.value=0.707;
     voice.micLowPass=voice.ctx.createBiquadFilter();
-    voice.micLowPass.type='lowpass';voice.micLowPass.frequency.value=3400;voice.micLowPass.Q.value=0.707;
+    voice.micLowPass.type='lowpass';voice.micLowPass.frequency.value=voice.uplinkRate===16000?7000:3400;voice.micLowPass.Q.value=0.707;
     voice.processor=voice.ctx.createScriptProcessor(1024,1,1);
     voice.processor.onaudioprocess=e=>sendMicPcm(downsample(e.inputBuffer.getChannelData(0),voice.ctx.sampleRate,voice.uplinkRate));
     voice.muteNode=voice.ctx.createGain();voice.muteNode.gain.value=0;
