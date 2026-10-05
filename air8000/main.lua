@@ -263,8 +263,29 @@ local function handle_relay_message(raw,fin,opcode)
         end
         return
     end
-    if msg.type == "command.dial" then dispatch_call_command(id,function() return _G.call_service:dial(id,p.number) end); return end
-    if msg.type == "command.answer" then dispatch_call_command(id,function() return _G.call_service:answer() end); return end
+    if msg.type == "command.dial" then
+        dispatch_call_command(id,function()
+            if media_backend=="carrier_rtp" then
+                local ok,err=carrier_rtp:start(id)
+                if not ok then return false,err end
+            end
+            local ok,err=_G.call_service:dial(id,p.number)
+            if not ok and media_backend=="carrier_rtp" then carrier_rtp:stop(true) end
+            return ok,err
+        end)
+        return
+    end
+    if msg.type == "command.answer" then
+        dispatch_call_command(id,function()
+            if media_backend=="carrier_rtp" then
+                local call=_G.call_service.current
+                local ok,err=carrier_rtp:start(call and call.call_id or id)
+                if not ok then return false,err end
+            end
+            return _G.call_service:answer()
+        end)
+        return
+    end
     if msg.type == "command.reject" then dispatch_call_command(id,function() return _G.call_service:reject() end); return end
     if msg.type == "command.hangup" then dispatch_call_command(id,function() return _G.call_service:hangup() end); return end
     if msg.type == "command.dtmf" then dispatch_call_command(id,function() return _G.call_service:dtmf(p.digit) end); return end
