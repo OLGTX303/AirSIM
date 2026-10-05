@@ -208,7 +208,7 @@ function M.start(cfg, identity, wlan_api, kv_api)
         if not (wlan_api.ready and wlan_api.ready()) then publish_status(nil,nil,"IP_LOSE") end
     end)
     sys.subscribe("WLAN_SCAN_DONE",publish_scan_results)
-    publish_status("ready")
+    publish_status(nil,nil,"BLE_READY")
     return true
 end
 
