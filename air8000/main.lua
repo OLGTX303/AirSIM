@@ -38,22 +38,18 @@ end
 if not gnss_api then gnss_api=libgnss end
 local sip_cfg=type(cfg.sip)=="table" and cfg.sip or {}
 local requested_media_backend=cfg.media_backend or "auto"
--- Stock LuatOS CC<->SIP bridging must be selected before cc.init().  Keep it
--- explicitly opt-in because the VPS must also provide a SIP endpoint; the
--- normal LAN WebSocket path remains the safe default until then.
-local sip_credentials_present=exsip and
-    type(sip_cfg.password or sip_cfg.sip_password)=="string" and
-    #(sip_cfg.password or sip_cfg.sip_password)>0
-if requested_media_backend=="auto" and exsip and (sip_cfg.enabled==true or sip_credentials_present) then
-    requested_media_backend="sip_bridge"
-    -- Older generated configs only contain sip.password and leave enabled
-    -- false.  Treat the supplied SIP credentials as an explicit migration
-    -- signal, without rewriting the protected config file on disk.
-    sip_cfg.enabled=true
-end
+-- In auto mode, media_manager chooses the native CC PCM bridge first.  The
+-- stock CC<->SIP bridge remains available when media_backend is explicitly
+-- set to sip_bridge; merely having exsip credentials must not override auto.
 local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsip,audio_v2=audio_v2,voip=voip})
 local media_backend=media_manager.select(requested_media_backend,caps)
-if log then log.info("airsim.media","selection",requested_media_backend,tostring(media_backend or "none"),"sip_enabled",tostring(sip_cfg.enabled==true),"exsip",tostring(exsip~=nil)) end
+if log then
+    log.info("airsim.media","selection",requested_media_backend,tostring(media_backend or "none"),
+        "carrier_rtp_pcm",tostring(caps.carrier_rtp_pcm),
+        "direct_pcm",tostring(caps.direct_pcm),
+        "sip_bridge",tostring(caps.sip_bridge),
+        "sip_enabled",tostring(sip_cfg.enabled==true),"exsip",tostring(exsip~=nil))
+end
 local device_identity=identity.read(mobile,mcu,cfg)
 local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp" or media_backend=="sip_bridge"; status.target_cellular_voice_rate=16000; status.wideband_volte=false
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
