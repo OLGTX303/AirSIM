@@ -186,9 +186,11 @@ async function ensureRtpSession(deviceID) {
     // The Air8000 SIP bridge can deliver several RTP packets in a burst.
     // Keep enough media queued to absorb that burst before clocking the
     // browser at one 20 ms frame per tick.
-    rxWarmupFrames:10,
-    rxHoldMs:360,
-    rxMissingGraceMs:60,
+    // LAN Wi-Fi tests have measured roughly 190 ms of jitter. Keep more than
+    // that in the startup cushion so a burst is not played as repeated gaps.
+    rxWarmupFrames:16,
+    rxHoldMs:600,
+    rxMissingGraceMs:80,
     rxMissingSince:0,
     lastArrivalMs:0,
     lastRtpTimestamp:null,
