@@ -37,11 +37,22 @@ function sameSecret(a, b) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, media_backend:d.media_backend || d.status?.media_backend || null, media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, media_stats:d.media_stats || emptyMediaStats(), events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, media_backend:d.media_backend || d.status?.media_backend || null, media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp" || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
 function emptyMediaStats() {
-  return {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0,rtp_rx_packets:0,rtp_tx_packets:0,rtp_tx_errors:0,last_activity:Date.now()};
+  return {
+    uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,
+    dropped_downlink_frames:0,rtp_rx_packets:0,rtp_tx_packets:0,rtp_tx_errors:0,
+    rtp_lost_packets:0,rtp_late_packets:0,rtp_duplicate_packets:0,
+    rtp_reordered_packets:0,rtp_jitter_ms:0,audio_concealment_frames:0,
+    uplink_dropped_frames:0,last_activity:Date.now()
+  };
+}
+function rtpSeqDelta(a,b) {
+  let d=((a&0xffff)-(b&0xffff))&0xffff;
+  if(d>0x7fff)d-=0x10000;
+  return d;
 }
 function resetMediaStats(deviceID) {
   const stats=emptyMediaStats();
@@ -132,46 +143,66 @@ async function ensureRtpSession(deviceID) {
     tx:randomRtpState(crypto.randomBytes),
     txStarted:false,
     pendingUplink:Buffer.alloc(0),
-    browserPcm:Buffer.alloc(0),
     lastRx:0,
+    rxQueue:new Map(),
+    rxExpected:null,
+    rxStarted:false,
+    rxWarmupFrames:6,
+    lastArrivalMs:0,
+    lastRtpTimestamp:null,
+    jitterMs:0,
+    rxTimer:null,
+    txTimer:null,
   };
   rtpSessions.set(deviceID,session);
+  session.rxTimer=setInterval(()=>playoutCarrierDownlink(session),20);
+  session.txTimer=setInterval(()=>flushCarrierUplink(session),20);
 
   socket.on("message",(packet,rinfo)=>{
     const parsed=parseRtpPacket(packet);
     if(!parsed || parsed.payloadType!==0 || parsed.payload.length===0)return;
+    const now=Date.now();
     session.remote={address:rinfo.address,port:rinfo.port};
-    session.lastRx=Date.now();
+    session.lastRx=now;
 
     const stats=getMediaStats(deviceID);
     stats.rtp_rx_packets++;
-    stats.downlink_frames++;
-    const pcm=decodePcmuPayload(parsed.payload);
-    stats.downlink_bytes+=pcm.length;
-    stats.last_activity=Date.now();
+    stats.last_activity=now;
     if(stats.rtp_rx_packets===1)console.log(`RTP received device=${deviceID} bytes=${parsed.payload.length} from=${rinfo.address}:${rinfo.port}`);
+
+    if(session.lastArrivalMs && session.lastRtpTimestamp!==null){
+      const arrivalDelta=now-session.lastArrivalMs;
+      const rtpDelta=((parsed.timestamp-session.lastRtpTimestamp)>>>0)/8;
+      if(rtpDelta<1000){
+        const variation=Math.abs(arrivalDelta-rtpDelta);
+        session.jitterMs += (variation-session.jitterMs)/16;
+        stats.rtp_jitter_ms=Math.round(session.jitterMs*10)/10;
+      }
+    }
+    session.lastArrivalMs=now;
+    session.lastRtpTimestamp=parsed.timestamp;
+
+    if(session.rxExpected===null)session.rxExpected=parsed.sequence;
+    const delta=rtpSeqDelta(parsed.sequence,session.rxExpected);
+    if(delta<0){
+      stats.rtp_late_packets++;
+      return;
+    }
+    if(session.rxQueue.has(parsed.sequence)){
+      stats.rtp_duplicate_packets++;
+      return;
+    }
+    if(delta>0)stats.rtp_reordered_packets++;
+    session.rxQueue.set(parsed.sequence,parsed.payload);
+    if(!session.rxStarted && session.rxQueue.size>=session.rxWarmupFrames)session.rxStarted=true;
 
     const device=devices.get(deviceID);
     if(device){
-      device.media_transport="carrier_rtp";
+      device.media_transport=sipBridgeEnabled(device)?"sip_rtp":"carrier_rtp";
       device.media_rate=8000;
       device.media_uplink_rate=8000;
       device.rtp_ready=true;
     }
-
-    const peer=mediaPeers.get(deviceID);
-    if(peer?.readyState===1){
-      // Coalesce four 20 ms RTP frames before crossing WebSocket/JavaScript.
-      // This keeps browser playback stream-like while retaining 20 ms RTP
-      // timing on the Air8000 side.
-      session.browserPcm=Buffer.concat([session.browserPcm,pcm]);
-      while(session.browserPcm.length>=1280){
-        peer.send(session.browserPcm.subarray(0,1280),{binary:true});
-        session.browserPcm=session.browserPcm.subarray(1280);
-      }
-    } else stats.dropped_downlink_frames++;
-
-    flushCarrierUplink(session);
   });
   socket.on("error",err=>console.error(`RTP socket error device=${deviceID} port=${port}: ${err.message}`));
   console.log(`RTP listener device=${deviceID} udp=${port} advertise=${host}`);
@@ -213,24 +244,65 @@ function resetRtpSession(session) {
   session.txStarted=false;
   session.pendingUplink=Buffer.alloc(0);
   session.lastRx=0;
+  session.rxQueue.clear();
+  session.rxExpected=null;
+  session.rxStarted=false;
+  session.lastArrivalMs=0;
+  session.lastRtpTimestamp=null;
+  session.jitterMs=0;
+}
+function playoutCarrierDownlink(session) {
+  if(!session)return;
+  const stats=getMediaStats(session.device_id);
+  if(!session.rxStarted){
+    if(session.rxQueue.size<session.rxWarmupFrames)return;
+    session.rxStarted=true;
+  }
+  if(session.rxExpected===null)return;
+
+  if(Date.now()-session.lastRx>500 && session.rxQueue.size===0){
+    session.rxStarted=false;
+    session.rxExpected=null;
+    return;
+  }
+
+  const payload=session.rxQueue.get(session.rxExpected);
+  let pcm;
+  if(payload){
+    session.rxQueue.delete(session.rxExpected);
+    pcm=decodePcmuPayload(payload);
+    stats.downlink_frames++;
+    stats.downlink_bytes+=pcm.length;
+  }else{
+    pcm=Buffer.alloc(320);
+    stats.rtp_lost_packets++;
+    stats.audio_concealment_frames++;
+  }
+  session.rxExpected=(session.rxExpected+1)&0xffff;
+  stats.last_activity=Date.now();
+
+  // Keep the browser clocked at exactly one 20 ms frame per tick. The
+  // WebAudio side adds its own short playout buffer, so UDP arrival jitter
+  // never directly controls speaker scheduling.
+  const peer=mediaPeers.get(session.device_id);
+  if(peer?.readyState===1)peer.send(pcm,{binary:true});
+  else stats.dropped_downlink_frames++;
 }
 function flushCarrierUplink(session) {
-  if(!session?.remote)return;
+  if(!session?.remote || session.pendingUplink.length<320)return;
   const stats=getMediaStats(session.device_id);
-  while(session.pendingUplink.length>=320){
-    const pcm=session.pendingUplink.subarray(0,320);
-    session.pendingUplink=session.pendingUplink.subarray(320);
-    const encoded=encodePcmuFrame(pcm);
-    const packet=buildRtpPacket(encoded,session.tx,0,!session.txStarted);
-    session.txStarted=true;
-    session.socket.send(packet,session.remote.port,session.remote.address,err=>{
-      if(err)stats.rtp_tx_errors++;
-    });
-    stats.rtp_tx_packets++;
-    stats.uplink_frames++;
-    stats.uplink_bytes+=pcm.length;
-    stats.last_activity=Date.now();
-  }
+  const pcm=session.pendingUplink.subarray(0,320);
+  session.pendingUplink=session.pendingUplink.subarray(320);
+  const encoded=encodePcmuFrame(pcm);
+  const packet=buildRtpPacket(encoded,session.tx,0,!session.txStarted);
+  session.txStarted=true;
+  session.socket.send(packet,session.remote.port,session.remote.address,err=>{
+    if(err)stats.rtp_tx_errors++;
+  });
+  stats.rtp_tx_packets++;
+  stats.uplink_frames++;
+  stats.uplink_bytes+=pcm.length;
+  stats.last_activity=Date.now();
 }
 function sendPcmToCarrier(deviceID,raw) {
   const session=rtpSessions.get(deviceID);
@@ -238,9 +310,13 @@ function sendPcmToCarrier(deviceID,raw) {
   const data=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
   if(data.length===0)return true;
   session.pendingUplink=Buffer.concat([session.pendingUplink,data]);
-  const max=320*10;
-  if(session.pendingUplink.length>max)session.pendingUplink=session.pendingUplink.subarray(session.pendingUplink.length-max);
-  flushCarrierUplink(session);
+  const max=320*12; // 240 ms hard ceiling; normal target stays below 80 ms.
+  if(session.pendingUplink.length>max){
+    const drop=session.pendingUplink.length-max;
+    const aligned=Math.ceil(drop/320)*320;
+    session.pendingUplink=session.pendingUplink.subarray(Math.min(aligned,session.pendingUplink.length));
+    getMediaStats(deviceID).uplink_dropped_frames+=Math.ceil(drop/320);
+  }
   return true;
 }
 
