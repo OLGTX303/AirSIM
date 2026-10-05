@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import dgram from "node:dgram";
 import { WebSocketServer } from "ws";
+import { buildRtpPacket, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState } from "./rtp-pcm.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const LAN_MODE = process.env.LAN_MODE === "true";
@@ -14,11 +16,17 @@ const ENROLLMENT_TOKEN = process.env.ENROLLMENT_TOKEN || "";
 const DEVICE_CA_CERT = process.env.DEVICE_CA_CERT || "/data/pki/device-ca.pem";
 const DEVICE_CA_KEY = process.env.DEVICE_CA_KEY || "/data/pki/device-ca-key.pem";
 const DEVICE_CA_SERIAL = `${DEVICE_CA_CERT}.srl`;
+const RTP_PUBLIC_HOST = String(process.env.RTP_PUBLIC_HOST || "").trim();
+const RTP_PORT_BASE = Number(process.env.RTP_PORT_BASE || 41000);
+const RTP_PORT_COUNT = Math.max(1, Math.min(256, Number(process.env.RTP_PORT_COUNT || 64)));
 const registry = JSON.parse(process.env.DEVICE_REGISTRY_JSON || "{}");
 const devices = new Map();
 const commands = new Map();
 const mediaTickets = new Map();
 const mediaPeers = new Map();
+const mediaStats = new Map();
+const rtpSessions = new Map();
+const usedRtpPorts = new Set();
 
 function sameSecret(a, b) {
   const left = Buffer.from(String(a || "")); const right = Buffer.from(String(b || ""));
@@ -27,9 +35,170 @@ function sameSecret(a, b) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location, wifi:d.wifi, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 16000, media_stats:d.media_stats || {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0}, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location, wifi:d.wifi, media_backend:d.media_backend || d.status?.media_backend || null, media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, media_stats:d.media_stats || emptyMediaStats(), events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
+function emptyMediaStats() {
+  return {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0,rtp_rx_packets:0,rtp_tx_packets:0,rtp_tx_errors:0,last_activity:Date.now()};
+}
+function resetMediaStats(deviceID) {
+  const stats=emptyMediaStats();
+  mediaStats.set(deviceID,stats);
+  const device=devices.get(deviceID);
+  if(device)device.media_stats=stats;
+  return stats;
+}
+function getMediaStats(deviceID) {
+  let stats=mediaStats.get(deviceID);
+  if(!stats)stats=resetMediaStats(deviceID);
+  return stats;
+}
+function firstLanIPv4() {
+  for(const entries of Object.values(os.networkInterfaces())){
+    for(const item of entries||[]){
+      if(item && item.family==="IPv4" && !item.internal)return item.address;
+    }
+  }
+  return "";
+}
+function rtpAdvertiseHost() {
+  return RTP_PUBLIC_HOST || (LAN_MODE ? firstLanIPv4() : "");
+}
+function carrierRtpEnabled(device) {
+  return !!(device && (device.media_backend==="carrier_rtp" || device.status?.media_backend==="carrier_rtp"));
+}
+function rtpControlMessage(device,payload) {
+  return {
+    protocol_version:"airsim.air8000.v1",
+    message_id:crypto.randomUUID(),
+    device_id:device.device_id,
+    timestamp:Date.now(),
+    nonce:crypto.randomUUID(),
+    type:"media.rtp_config",
+    payload,
+  };
+}
+function sendRtpConfig(device,session) {
+  if(!device?.socket || device.socket.readyState!==1 || !session)return false;
+  const host=rtpAdvertiseHost();
+  if(!host)return false;
+  const payload={host,port:session.port,codec:"PCMU",sample_rate:8000,ptime:20,generation:session.generation};
+  device.socket.send(JSON.stringify(rtpControlMessage(device,payload)));
+  device.rtp_ready=false;
+  return true;
+}
+function bindUdp(socket,port) {
+  return new Promise((resolve,reject)=>{
+    const onError=err=>{socket.off("listening",onListen);reject(err)};
+    const onListen=()=>{socket.off("error",onError);resolve()};
+    socket.once("error",onError);
+    socket.once("listening",onListen);
+    socket.bind(port,"0.0.0.0");
+  });
+}
+async function ensureRtpSession(deviceID) {
+  let existing=rtpSessions.get(deviceID);
+  if(existing)return existing;
+  const host=rtpAdvertiseHost();
+  if(!host)throw Error("RTP_PUBLIC_HOST is required for carrier RTP media outside LAN mode");
+
+  let socket=null,port=0;
+  for(let i=0;i<RTP_PORT_COUNT;i++){
+    const candidate=RTP_PORT_BASE+i;
+    if(usedRtpPorts.has(candidate))continue;
+    const attempt=dgram.createSocket("udp4");
+    try{
+      await bindUdp(attempt,candidate);
+      socket=attempt;port=candidate;usedRtpPorts.add(candidate);break;
+    }catch(err){
+      try{attempt.close()}catch{}
+      if(err?.code!=="EADDRINUSE")throw err;
+    }
+  }
+  if(!socket)throw Error("no free RTP UDP port in configured range");
+
+  const session={
+    device_id:deviceID,
+    socket,
+    port,
+    remote:null,
+    generation:1,
+    tx:randomRtpState(crypto.randomBytes),
+    txStarted:false,
+    pendingUplink:Buffer.alloc(0),
+    lastRx:0,
+  };
+  rtpSessions.set(deviceID,session);
+
+  socket.on("message",(packet,rinfo)=>{
+    const parsed=parseRtpPacket(packet);
+    if(!parsed || parsed.payloadType!==0 || parsed.payload.length===0)return;
+    session.remote={address:rinfo.address,port:rinfo.port};
+    session.lastRx=Date.now();
+
+    const stats=getMediaStats(deviceID);
+    stats.rtp_rx_packets++;
+    stats.downlink_frames++;
+    const pcm=decodePcmuPayload(parsed.payload);
+    stats.downlink_bytes+=pcm.length;
+    stats.last_activity=Date.now();
+
+    const device=devices.get(deviceID);
+    if(device){
+      device.media_transport="carrier_rtp";
+      device.media_rate=8000;
+      device.media_uplink_rate=8000;
+      device.rtp_ready=true;
+    }
+
+    const peer=mediaPeers.get(deviceID);
+    if(peer?.readyState===1)peer.send(pcm,{binary:true});
+    else stats.dropped_downlink_frames++;
+
+    flushCarrierUplink(session);
+  });
+  socket.on("error",err=>console.error(`RTP socket error device=${deviceID} port=${port}: ${err.message}`));
+  console.log(`RTP listener device=${deviceID} udp=${port} advertise=${host}`);
+  return session;
+}
+function resetRtpSession(session) {
+  session.generation++;
+  session.remote=null;
+  session.tx=randomRtpState(crypto.randomBytes);
+  session.txStarted=false;
+  session.pendingUplink=Buffer.alloc(0);
+  session.lastRx=0;
+}
+function flushCarrierUplink(session) {
+  if(!session?.remote)return;
+  const stats=getMediaStats(session.device_id);
+  while(session.pendingUplink.length>=320){
+    const pcm=session.pendingUplink.subarray(0,320);
+    session.pendingUplink=session.pendingUplink.subarray(320);
+    const encoded=encodePcmuFrame(pcm);
+    const packet=buildRtpPacket(encoded,session.tx,0,!session.txStarted);
+    session.txStarted=true;
+    session.socket.send(packet,session.remote.port,session.remote.address,err=>{
+      if(err)stats.rtp_tx_errors++;
+    });
+    stats.rtp_tx_packets++;
+    stats.uplink_frames++;
+    stats.uplink_bytes+=pcm.length;
+    stats.last_activity=Date.now();
+  }
+}
+function sendPcmToCarrier(deviceID,raw) {
+  const session=rtpSessions.get(deviceID);
+  if(!session)return false;
+  const data=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
+  if(data.length===0)return true;
+  session.pendingUplink=Buffer.concat([session.pendingUplink,data]);
+  const max=320*10;
+  if(session.pendingUplink.length>max)session.pendingUplink=session.pendingUplink.subarray(session.pendingUplink.length-max);
+  flushCarrierUplink(session);
+  return true;
+}
+
 function ensureCA() {
   if (fs.existsSync(DEVICE_CA_CERT) && fs.existsSync(DEVICE_CA_KEY)) {
     if (!fs.existsSync(DEVICE_CA_SERIAL)) fs.writeFileSync(DEVICE_CA_SERIAL, `${crypto.randomBytes(16).toString("hex")}\n`, { mode: 0o600 });
@@ -73,7 +242,31 @@ const server=http.createServer(async (req,res)=>{
     if (req.method === "GET" && u.pathname === "/api/devices") return json(res,200,[...devices.values()].map(publicDevice));
     const match=u.pathname.match(/^\/api\/devices\/([^/]+)\/command$/);
     const mediaMatch=u.pathname.match(/^\/api\/devices\/([^/]+)\/media-ticket$/);
-    if (req.method === "POST" && mediaMatch) { const id=decodeURIComponent(mediaMatch[1]); const d=devices.get(id); if(!d?.socket || d.socket.readyState!==1) return json(res,409,{error:"device offline"}); const ticket=issueMediaTicket(id); const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0]; return json(res,201,{expires_in:60,sample_rate:d.media_rate||8000,downlink_sample_rate:d.media_rate||8000,uplink_sample_rate:d.media_uplink_rate||16000,ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`}); }
+    if (req.method === "POST" && mediaMatch) {
+      const id=decodeURIComponent(mediaMatch[1]);
+      const d=devices.get(id);
+      if(!d?.socket || d.socket.readyState!==1)return json(res,409,{error:"device offline"});
+      resetMediaStats(id);
+      if(carrierRtpEnabled(d)){
+        const session=await ensureRtpSession(id);
+        resetRtpSession(session);
+        if(!sendRtpConfig(d,session))return json(res,503,{error:"carrier RTP host is not configured"});
+        d.media_transport="carrier_rtp";
+        d.media_rate=8000;
+        d.media_uplink_rate=8000;
+      }
+      const ticket=issueMediaTicket(id);
+      const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0];
+      return json(res,201,{
+        expires_in:60,
+        sample_rate:d.media_rate||8000,
+        downlink_sample_rate:d.media_rate||8000,
+        uplink_sample_rate:carrierRtpEnabled(d)?8000:(d.media_uplink_rate||16000),
+        transport:carrierRtpEnabled(d)?"carrier_rtp":"websocket_pcm",
+        real_early_media:carrierRtpEnabled(d),
+        ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`
+      });
+    }
     if (req.method === "POST" && match) { const value=await body(req); const id=decodeURIComponent(match[1]); if (!["dial","answer","reject","hangup","dtmf","send_sms","gps_request","wifi_config","wifi_connect","wifi_disconnect"].includes(value.type)) return json(res,400,{error:"unsupported command"}); const commandID=command(id,value.type,value.payload||{}); return commandID ? json(res,202,{accepted:true,command_id:commandID}) : json(res,409,{error:"device offline"}); }
     return json(res,404,{error:"not found"});
   } catch (e) { return json(res,400,{error:e.message}); }
@@ -81,7 +274,6 @@ const server=http.createServer(async (req,res)=>{
 
 const wss=new WebSocketServer({noServer:true});
 const mediaWss=new WebSocketServer({noServer:true});
-const mediaStats=new Map();
 // LAN diagnostics: log only connection/message type and device identity, never
 // enrollment tokens, device secrets, passwords, SMS, or message payloads.
 wss.on("connection",(ws,req)=>{ console.log(`Air8000 WebSocket accepted from ${req.socket.remoteAddress||"unknown"}`); ws.on("message",(raw,isBinary)=>{ if(!isBinary){ try { const msg=JSON.parse(raw.toString()); console.log(`Air8000 message type=${msg.type||"unknown"} device=${msg.device_id||"unknown"} payload=${msg.payload&&typeof msg.payload==="object"?"present":"absent"}`); } catch { console.log("Air8000 message invalid_json"); } } }); });
@@ -100,22 +292,25 @@ server.on("upgrade", (req, socket, head) => {
 });
 mediaWss.on("connection",(ws,deviceID)=>{
   const old=mediaPeers.get(deviceID); if(old)try{old.close(4000,"replaced")}catch{}
-  mediaPeers.set(deviceID,ws)
-  const stats={uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0,last_activity:Date.now()}
-  mediaStats.set(deviceID,stats)
-  const device=devices.get(deviceID); if(device) device.media_stats=stats
-  console.log(`media connected device=${deviceID}`)
+  mediaPeers.set(deviceID,ws);
+  const stats=getMediaStats(deviceID);
+  const device=devices.get(deviceID); if(device)device.media_stats=stats;
+  console.log(`media connected device=${deviceID} transport=${carrierRtpEnabled(device)?"carrier_rtp":"websocket_pcm"}`);
   ws.on("message",(raw,isBinary)=>{
-    if(!isBinary)return
-    stats.uplink_frames++; stats.uplink_bytes+=raw.length; stats.last_activity=Date.now()
-    if(stats.uplink_frames===1)console.log(`media uplink device=${deviceID} bytes=${raw.length}`)
-    const d=devices.get(deviceID); if(d?.socket?.readyState===1)d.socket.send(raw,{binary:true})
-  })
+    if(!isBinary)return;
+    const d=devices.get(deviceID);
+    if(carrierRtpEnabled(d)){
+      if(!sendPcmToCarrier(deviceID,raw))stats.rtp_tx_errors++;
+      return;
+    }
+    stats.uplink_frames++; stats.uplink_bytes+=raw.length; stats.last_activity=Date.now();
+    if(stats.uplink_frames===1)console.log(`media uplink device=${deviceID} bytes=${raw.length}`);
+    if(d?.socket?.readyState===1)d.socket.send(raw,{binary:true});
+  });
   ws.on("close",()=>{
-    if(mediaPeers.get(deviceID)===ws)mediaPeers.delete(deviceID)
-    mediaStats.delete(deviceID)
-    console.log(`media disconnected device=${deviceID}`)
-  })
+    if(mediaPeers.get(deviceID)===ws)mediaPeers.delete(deviceID);
+    console.log(`media disconnected device=${deviceID}`);
+  });
 });
  wss.on("connection", (ws, req) => {
   let device = null;
@@ -173,9 +368,12 @@ mediaWss.on("connection",(ws,deviceID)=>{
           status: identity.status || {},
           location: null,
           wifi: null,
+          media_backend: identity.status?.media_backend || null,
+          media_transport: identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : "websocket_pcm",
           media_rate: 8000,
-          media_uplink_rate: 16000,
-          media_stats: {uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,dropped_downlink_frames:0},
+          media_uplink_rate: identity.status?.media_backend === "carrier_rtp" ? 8000 : 16000,
+          media_stats: emptyMediaStats(),
+          rtp_ready: false,
           events: [],
           socket: ws,
           last_seen: Date.now(),
@@ -183,7 +381,12 @@ mediaWss.on("connection",(ws,deviceID)=>{
         };
         devices.set(device.device_id, device);
         ws.send(JSON.stringify({ type: "device.register.ack", device_id: device.device_id, protocol_version: "airsim.air8000.v1", authentication: device.authentication }));
-        console.log(`Air8000 device active: ${device.device_id}`);
+        if(carrierRtpEnabled(device)){
+          ensureRtpSession(device.device_id).then(session=>sendRtpConfig(device,session)).catch(err=>{
+            console.error(`carrier RTP setup failed device=${device.device_id}: ${err.message}`);
+          });
+        }
+        console.log(`Air8000 device active: ${device.device_id} media=${device.media_backend||"direct_pcm"}`);
         return;
       }
       device.last_seen = Date.now();
@@ -191,8 +394,14 @@ mediaWss.on("connection",(ws,deviceID)=>{
       if (msg.type === "device.status" || msg.type === "event.status") device.status = msg.payload || msg.status;
       if (msg.type === "device.wifi" || msg.type === "event.wifi") device.wifi = msg.payload || msg.wifi;
       if (msg.type === "device.command_result" && msg.payload?.payload?.fix_state) device.location = msg.payload.payload;
-      if (msg.type === "media.open" || msg.type === "media.ready") { device.media_rate = Number(msg.payload?.downlink_sample_rate || msg.payload?.sample_rate) || 8000; device.media_uplink_rate = Number(msg.payload?.uplink_sample_rate) || 16000; }
-      if (["call.state", "sms.received", "sms.sent", "device.command_result", "media.open"].includes(msg.type)) {
+      if (msg.type === "media.open" || msg.type === "media.ready" || msg.type === "media.early") {
+        device.media_rate=Number(msg.payload?.downlink_sample_rate || msg.payload?.sample_rate) || 8000;
+        device.media_uplink_rate=Number(msg.payload?.uplink_sample_rate) || (carrierRtpEnabled(device)?8000:16000);
+        if(msg.payload?.backend)device.media_backend=msg.payload.backend;
+        if(msg.payload?.transport)device.media_transport=msg.payload.transport;
+      }
+      if (msg.type === "media.rtp_config.ack") device.rtp_ready = msg.payload?.ok === true;
+      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "media.open", "media.early", "media.phase"].includes(msg.type)) {
         device.events = device.events || [];
         device.events.push({ type: msg.type, payload: msg.payload || {}, timestamp: msg.timestamp || Date.now() });
         if (device.events.length > 100) device.events.shift();
@@ -206,4 +415,8 @@ mediaWss.on("connection",(ws,deviceID)=>{
     }
   });
  });
-server.listen(PORT,()=>console.log(`AirSIM Air8000 VPS gateway listening on ${PORT}`));
+server.listen(PORT,()=>{
+  console.log(`AirSIM Air8000 VPS gateway listening on ${PORT}`);
+  const host=rtpAdvertiseHost();
+  console.log(host?`Carrier RTP: ${host} UDP ${RTP_PORT_BASE}-${RTP_PORT_BASE+RTP_PORT_COUNT-1}`:"Carrier RTP disabled: set RTP_PUBLIC_HOST");
+});
