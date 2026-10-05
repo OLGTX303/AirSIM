@@ -2,7 +2,14 @@
   "name": "airsim-air8000-vps",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": { "ble:test": "node ble-test.mjs" },
-  "dependencies": { "ws": "^8.18.0" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "ble:test": "node ble-test.mjs",
+    "test": "node rtp-pcm.test.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }
