@@ -141,6 +141,17 @@ ok("SIP bridge uses official ringback and reports negotiated VoLTE rate", functi
   assert(src:find('wideband_volte',1,true))
 end)
 
+ok("SIP bridge can refresh and resume after gateway restart", function()
+  local fp=assert(io.open("main.lua","r"))
+  local src=fp:read("*a")
+  fp:close()
+  assert(src:find("server_instance_id",1,true))
+  assert(src:find("refresh_sip_registration",1,true))
+  assert(src:find("x-airsim-resume",1,true))
+  assert(src:find("resume_existing_cc",1,true))
+  assert(src:find("status.active_call",1,true))
+end)
+
 ok("Wi-Fi telemetry reports actual IP-ready connection", function()
   local W=require("system.wifi_status")
   local wlan={
