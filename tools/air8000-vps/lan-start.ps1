@@ -47,11 +47,14 @@ if ($relayHost) { $ip = $addresses | Where-Object { $_.IPAddress -eq $relayHost 
 if (-not $ip) { $ip = $addresses | Where-Object { $_.IPAddress -like '192.168.1.*' } | Select-Object -First 1 -ExpandProperty IPAddress }
 if (-not $ip) { $ip = $addresses | Select-Object -First 1 -ExpandProperty IPAddress }
 if ([string]::IsNullOrWhiteSpace($ip)) { $ip = "localhost" }
+$env:RTP_PUBLIC_HOST = $ip
+$env:SIP_PORT = "5060"
 $dashboardUrl = "http://localhost`:$Port/"
 $lanDashboardUrl = "http://$ip`:$Port/"
 Write-Host "Local dashboard (BLE enabled): $dashboardUrl"
 Write-Host "LAN dashboard: http://$ip`:$Port/"
 Write-Host "Air8000 URL: ws://$ip`:$Port/device"
+Write-Host "Air8000 SIP: udp://$ip`:5060"
 Write-Host "Credentials are loaded automatically from the local protected secrets/config files."
 $openDashboard = if ($OpenLan) { $lanDashboardUrl } else { $dashboardUrl }
 Start-Process "$openDashboard#token=$admin"

@@ -15,6 +15,11 @@ local sms_module=require("cellular.sms")
 local pcm_module=require("media.direct_pcm")
 local carrier_rtp_module=require("media.carrier_rtp")
 local media_manager=require("media.media_manager")
+local exsip=nil
+do
+    local ok,module=pcall(require,"exsip")
+    if ok and type(module)=="table" then exsip=module end
+end
 local kv_api=nil
 if fskv then
     if fskv.init then pcall(fskv.init) end
@@ -30,10 +35,26 @@ if not gnss_api then
     if ok and module then gnss_api=module; _G.exgnss=module end
 end
 if not gnss_api then gnss_api=libgnss end
-local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2,voip=voip})
-local media_backend=media_manager.select(cfg.media_backend or "auto",caps)
+local sip_cfg=type(cfg.sip)=="table" and cfg.sip or {}
+local requested_media_backend=cfg.media_backend or "auto"
+-- Stock LuatOS CC<->SIP bridging must be selected before cc.init().  Keep it
+-- explicitly opt-in because the VPS must also provide a SIP endpoint; the
+-- normal LAN WebSocket path remains the safe default until then.
+local sip_credentials_present=exsip and
+    type(sip_cfg.password or sip_cfg.sip_password)=="string" and
+    #(sip_cfg.password or sip_cfg.sip_password)>0
+if requested_media_backend=="auto" and exsip and (sip_cfg.enabled==true or sip_credentials_present) then
+    requested_media_backend="sip_bridge"
+    -- Older generated configs only contain sip.password and leave enabled
+    -- false.  Treat the supplied SIP credentials as an explicit migration
+    -- signal, without rewriting the protected config file on disk.
+    sip_cfg.enabled=true
+end
+local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsip,audio_v2=audio_v2,voip=voip})
+local media_backend=media_manager.select(requested_media_backend,caps)
+if log then log.info("airsim.media","selection",requested_media_backend,tostring(media_backend or "none"),"sip_enabled",tostring(sip_cfg.enabled==true),"exsip",tostring(exsip~=nil)) end
 local device_identity=identity.read(mobile,mcu,cfg)
-local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp"
+local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp" or media_backend=="sip_bridge"
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
 
 local function now_ms()
@@ -74,7 +95,68 @@ local uplink_frames=0
 local uplink_bytes=0
 local downlink_pending=""
 
+local function disable_bridge_tone()
+    if cc and type(cc.bridgeTone)=="function" then pcall(cc.bridgeTone,false) end
+    if voip and type(voip.bridgeTone)=="function" then pcall(voip.bridgeTone,false) end
+end
+
+local function init_stock_sip_bridge()
+    if not exsip then return false,"exsip_unavailable" end
+    if sip_cfg.enabled~=true then return false,"sip_bridge_disabled" end
+    local username=sip_cfg.sip_username or sip_cfg.username or cfg.device_id
+    local password=sip_cfg.sip_password or sip_cfg.password
+    local relay_host=type(cfg.relay_url)=="string" and cfg.relay_url:match("^[%w+.-]+://([^/:]+)") or nil
+    local server=sip_cfg.sip_server_addr or sip_cfg.server_addr or relay_host
+    if type(server)~="string" or server=="" or type(username)~="string" or username=="" or
+       type(password)~="string" or password=="" then
+        return false,"sip_bridge_config_incomplete"
+    end
+    local init_config={
+        sip_server_addr=server,
+        sip_server_port=tonumber(sip_cfg.sip_server_port or sip_cfg.server_port or 5060),
+        sip_domain=sip_cfg.sip_domain or sip_cfg.domain or server,
+        sip_username=username,
+        sip_password=password,
+        sip_transport=sip_cfg.sip_transport or "udp",
+        rtp_port=tonumber(sip_cfg.rtp_port or 40000),
+        codecs=sip_cfg.codecs or {"PCMU"},
+        ptime=tonumber(sip_cfg.ptime or 20),
+        cc_sip_bridge=true,
+        auto_answer=sip_cfg.auto_answer==true,
+        early_media=sip_cfg.early_media~=false,
+        early_media_response=tonumber(sip_cfg.early_media_response or 183),
+        adapter=sip_cfg.adapter or (socket and socket.LWIP_STA),
+    }
+    local ok,result=pcall(exsip.init,init_config)
+    if not ok or result==false then return false,ok and "exsip_init_failed" or tostring(result) end
+    disable_bridge_tone()
+    if log then log.info("airsim.media","backend","sip_bridge","early_media",true) end
+    return true
+end
+
 local function init_cc_backend()
+    if media_backend=="sip_bridge" then
+        local bridge_ok,bridge_err=init_stock_sip_bridge()
+        if not bridge_ok then
+            if log then log.warn("airsim.media","sip_bridge_init_failed",tostring(bridge_err or "unknown")) end
+            if caps.direct_pcm then
+                media_backend="direct_pcm"
+                status.media_backend=media_backend
+                status.real_early_media=false
+            else
+                return false,bridge_err
+            end
+        else
+            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
+            local init_ok,init_result=pcall(cc.init,0)
+            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
+            if not init_ok or init_result==false then return false,"cc_init_failed" end
+            local start_ok,start_result=pcall(exsip.start)
+            if log then log.info("airsim.sip","start",tostring(start_ok and start_result)) end
+            if not start_ok or start_result==false then return false,"exsip_start_failed" end
+            return true
+        end
+    end
     if media_backend=="carrier_rtp" then
         local ok,err=carrier_rtp:init()
         if ok then
@@ -87,7 +169,7 @@ local function init_cc_backend()
         if caps.direct_pcm then
             media_backend="direct_pcm"
             status.media_backend=media_backend
-            status.real_early_media=false
+                status.real_early_media=false
         else
             return false,err
         end
@@ -148,6 +230,23 @@ end
 
 local function announce_media(kind)
     if not _G.relay_client then return end
+    if media_backend=="sip_bridge" then
+        _G.relay_client:send(kind,{
+            call_id=exsip and exsip.get_current_call and exsip.get_current_call() or nil,
+            backend="sip_bridge",
+            transport="sip_rtp",
+            real_early_media=true,
+            sample_rate=8000,
+            downlink_sample_rate=8000,
+            uplink_sample_rate=8000,
+            channels=1,
+            bits=16,
+            codec="PCMU",
+            format="pcm_s16le",
+            frame_duration_ms=20,
+        },os.time()*1000)
+        return
+    end
     local stats=current_media_stats()
     _G.relay_client:send(kind,{
         call_id=stats.call_id,
@@ -220,6 +319,16 @@ local function emit_event(kind,payload)
                    payload.event=="reject" or payload.event=="remote_hangup" then
                 stop_media(true)
             end
+        elseif media_backend=="sip_bridge" then
+            -- SIP owns the VoIP media engine.  CC remains the cellular leg:
+            -- send 200/ACK only after the carrier reports connected, and tear
+            -- down both legs when either side ends.
+            if payload.event=="connected" then
+                if exsip then pcall(exsip.accept) end
+            elseif payload.event=="failed" or payload.event=="hangup" or
+                   payload.event=="reject" or payload.event=="remote_hangup" then
+                if exsip then pcall(exsip.hangUp) end
+            end
         else
             if payload.event=="connected" then
                 start_direct_media(payload.call)
@@ -229,7 +338,14 @@ local function emit_event(kind,payload)
             end
         end
     elseif kind=="call.audio_start" and payload and payload.call then
-        start_uplink_source(payload.call)
+        -- In stock CC<->SIP bridge mode the modem/VoIP C layer owns both
+        -- directions. Starting the legacy direct_pcm source here races the
+        -- bridge and produces "cc is not true start"/extern_source_failed.
+        if media_backend~="sip_bridge" then
+            start_uplink_source(payload.call)
+        elseif log then
+            log.info("airsim.media","sip_bridge_audio_start")
+        end
     elseif kind=="call.media" and media_backend=="carrier_rtp" then
         announce_media(payload.event=="play" and "media.early" or "media.phase")
     end
@@ -238,6 +354,34 @@ end
 _G.call_service=call_module.new(cc,emit_event)
 _G.sms_service=sms_module.new(sms,function(kind,payload) if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end end,cfg.limits and cfg.limits.max_sms_body)
 _G.gnss_service=gnss_module.new(gnss_api,cfg.location_policy)
+
+if media_backend=="sip_bridge" and exsip then
+    exsip.on(function(event_type,action,payload)
+        if event_type=="call" and action=="incoming" then
+            local headers=type(payload) == "table" and payload.headers or {}
+            local number=headers and (headers["x-airsim-number"] or headers["x-air8000-number"])
+            if type(number)~="string" or number=="" then
+                pcall(exsip.fail,400,"Missing cellular destination")
+                return
+            end
+            local ok,err=_G.call_service:dial(payload.call_id or tostring(os.time()),number)
+            if ok then
+                -- Open SIP early media before the cellular leg answers.
+                pcall(exsip.progress)
+            else
+                pcall(exsip.fail,486,tostring(err or "Cellular line busy"))
+            end
+        elseif event_type=="media" and action=="ready" then
+            announce_media("media.open")
+        elseif event_type=="media" and action=="stop" then
+            announce_media("media.close")
+        elseif event_type=="call" and (action=="ended" or action=="failed") then
+            if _G.call_service.current then pcall(_G.call_service.hangup) end
+        elseif event_type=="error" and log then
+            log.warn("airsim.sip", "event_error")
+        end
+    end)
+end
 status.gnss_state=_G.gnss_service.state
 status.location=_G.gnss_service.last
 
@@ -444,7 +588,7 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
                 _G.relay_transport=transport
                 _G.relay_client=relay_module.new(cfg,transport)
                 status.media_backend=media_backend
-                status.real_early_media=media_backend=="carrier_rtp"
+                status.real_early_media=media_backend=="carrier_rtp" or media_backend=="sip_bridge"
                 status.wifi=wifi_snapshot("REGISTER")
                 status.wifi_state=status.wifi.state
                 status.gnss_state=_G.gnss_service and _G.gnss_service.state or status.gnss_state

@@ -128,6 +128,20 @@ quality `2` uses 16 kHz PCM for wideband/VoLTE calls; quality `1` uses 8 kHz
 PCM when the carrier or modem negotiates narrowband. The portal does not claim
 16 kHz when the carrier has not actually negotiated it.
 
+### Stock CC-SIP bridge on the LAN
+
+The gateway includes a minimal UDP SIP registrar/UAS for the Air8000 stock
+`exsip` bridge. LAN mode listens on UDP 5060, accepts device `REGISTER`
+requests, sends a PCMU/8000 SDP `INVITE` when the portal dials, and handles
+`183`, `200`, `ACK`, `CANCEL`, and `BYE`. The existing RTP socket then carries
+the Air8000-to-browser audio path.
+
+Keep UDP 5060 and the RTP range private to the LAN during testing. Cloudflare
+HTTP proxying does not proxy these UDP ports. The device must use
+`media_backend = "sip_bridge"`, set `sip.enabled = true`, and point
+`sip_server_addr` at the Windows/VPS LAN address. The SIP username must match
+the registered Air8000 `device_id`; keep SIP passwords out of Git and chat.
+
 For BLE Wi-Fi setup followed by automatic LAN enrollment, keep the generated
 `enrollment_token` in the private `air8000/config.lua`. The current
 `lan-start.ps1` is non-interactive: it reads the device ID and enrollment token

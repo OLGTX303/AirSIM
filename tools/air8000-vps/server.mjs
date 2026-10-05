@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import dgram from "node:dgram";
 import { WebSocketServer } from "ws";
 import { buildRtpPacket, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState } from "./rtp-pcm.mjs";
+import { SipUdpServer } from "./sip-udp.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const LAN_MODE = process.env.LAN_MODE === "true";
@@ -19,6 +20,7 @@ const DEVICE_CA_SERIAL = `${DEVICE_CA_CERT}.srl`;
 const RTP_PUBLIC_HOST = String(process.env.RTP_PUBLIC_HOST || "").trim();
 const RTP_PORT_BASE = Number(process.env.RTP_PORT_BASE || 41000);
 const RTP_PORT_COUNT = Math.max(1, Math.min(256, Number(process.env.RTP_PORT_COUNT || 64)));
+const SIP_PORT = Number(process.env.SIP_PORT || 5060);
 const registry = JSON.parse(process.env.DEVICE_REGISTRY_JSON || "{}");
 const devices = new Map();
 const commands = new Map();
@@ -67,6 +69,10 @@ function rtpAdvertiseHost() {
 function carrierRtpEnabled(device) {
   return !!(device && (device.media_backend==="carrier_rtp" || device.status?.media_backend==="carrier_rtp"));
 }
+function sipBridgeEnabled(device) {
+  return !!(device && (device.media_backend==="sip_bridge" || device.status?.media_backend==="sip_bridge"));
+}
+function rtpMediaEnabled(device) { return carrierRtpEnabled(device) || sipBridgeEnabled(device); }
 function rtpControlMessage(device,payload) {
   return {
     protocol_version:"airsim.air8000.v1",
@@ -126,6 +132,7 @@ async function ensureRtpSession(deviceID) {
     tx:randomRtpState(crypto.randomBytes),
     txStarted:false,
     pendingUplink:Buffer.alloc(0),
+    browserPcm:Buffer.alloc(0),
     lastRx:0,
   };
   rtpSessions.set(deviceID,session);
@@ -142,6 +149,7 @@ async function ensureRtpSession(deviceID) {
     const pcm=decodePcmuPayload(parsed.payload);
     stats.downlink_bytes+=pcm.length;
     stats.last_activity=Date.now();
+    if(stats.rtp_rx_packets===1)console.log(`RTP received device=${deviceID} bytes=${parsed.payload.length} from=${rinfo.address}:${rinfo.port}`);
 
     const device=devices.get(deviceID);
     if(device){
@@ -152,8 +160,16 @@ async function ensureRtpSession(deviceID) {
     }
 
     const peer=mediaPeers.get(deviceID);
-    if(peer?.readyState===1)peer.send(pcm,{binary:true});
-    else stats.dropped_downlink_frames++;
+    if(peer?.readyState===1){
+      // Coalesce four 20 ms RTP frames before crossing WebSocket/JavaScript.
+      // This keeps browser playback stream-like while retaining 20 ms RTP
+      // timing on the Air8000 side.
+      session.browserPcm=Buffer.concat([session.browserPcm,pcm]);
+      while(session.browserPcm.length>=1280){
+        peer.send(session.browserPcm.subarray(0,1280),{binary:true});
+        session.browserPcm=session.browserPcm.subarray(1280);
+      }
+    } else stats.dropped_downlink_frames++;
 
     flushCarrierUplink(session);
   });
@@ -161,6 +177,35 @@ async function ensureRtpSession(deviceID) {
   console.log(`RTP listener device=${deviceID} udp=${port} advertise=${host}`);
   return session;
 }
+
+const sipServer = new SipUdpServer({
+  port: SIP_PORT,
+  domain: process.env.SIP_DOMAIN || "airsim.local",
+  advertiseHost: rtpAdvertiseHost(),
+  onRegister(registration) {
+    const device = devices.get(registration.device_id);
+    if (device) device.sip_registration = { address: registration.address, port: registration.port, expires_at: registration.expires_at };
+  },
+  onMedia(event) {
+    const session = event.session;
+    if (!session || !event.device_id) return;
+    session.remote = event.remote;
+    const device = devices.get(event.device_id);
+    if (device) {
+      device.media_transport = "sip_rtp";
+      device.media_rate = 8000;
+      device.media_uplink_rate = 8000;
+      device.rtp_ready = true;
+    }
+    console.log(`SIP media ${event.type} device=${event.device_id} rtp=${event.remote.address}:${event.remote.port}`);
+  },
+  onState(event) {
+    if (event.type === "dial" || event.type === "progress" || event.type === "connected" || event.type === "ended" || event.type === "failed") {
+      console.log(`SIP call ${event.type} device=${event.device_id}`);
+    }
+  },
+});
+
 function resetRtpSession(session) {
   session.generation++;
   session.remote=null;
@@ -247,11 +292,16 @@ const server=http.createServer(async (req,res)=>{
       const d=devices.get(id);
       if(!d?.socket || d.socket.readyState!==1)return json(res,409,{error:"device offline"});
       resetMediaStats(id);
-      if(carrierRtpEnabled(d)){
+      if(rtpMediaEnabled(d)){
         const session=await ensureRtpSession(id);
         resetRtpSession(session);
-        if(!sendRtpConfig(d,session))return json(res,503,{error:"carrier RTP host is not configured"});
-        d.media_transport="carrier_rtp";
+        if(carrierRtpEnabled(d)){
+          if(!sendRtpConfig(d,session))return json(res,503,{error:"carrier RTP host is not configured"});
+          d.media_transport="carrier_rtp";
+        } else {
+          if(!sipServer.registration(id))return json(res,409,{error:"device SIP registration is not ready"});
+          d.media_transport="sip_rtp";
+        }
         d.media_rate=8000;
         d.media_uplink_rate=8000;
       }
@@ -261,13 +311,34 @@ const server=http.createServer(async (req,res)=>{
         expires_in:60,
         sample_rate:d.media_rate||8000,
         downlink_sample_rate:d.media_rate||8000,
-        uplink_sample_rate:carrierRtpEnabled(d)?8000:(d.media_uplink_rate||16000),
-        transport:carrierRtpEnabled(d)?"carrier_rtp":"websocket_pcm",
-        real_early_media:carrierRtpEnabled(d),
+        uplink_sample_rate:rtpMediaEnabled(d)?8000:(d.media_uplink_rate||16000),
+        transport:rtpMediaEnabled(d)?(carrierRtpEnabled(d)?"carrier_rtp":"sip_rtp"):"websocket_pcm",
+        real_early_media:carrierRtpEnabled(d) || sipBridgeEnabled(d),
         ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`
       });
     }
-    if (req.method === "POST" && match) { const value=await body(req); const id=decodeURIComponent(match[1]); if (!["dial","answer","reject","hangup","dtmf","send_sms","gps_request","wifi_config","wifi_connect","wifi_disconnect"].includes(value.type)) return json(res,400,{error:"unsupported command"}); const commandID=command(id,value.type,value.payload||{}); return commandID ? json(res,202,{accepted:true,command_id:commandID}) : json(res,409,{error:"device offline"}); }
+    if (req.method === "POST" && match) {
+      const value=await body(req); const id=decodeURIComponent(match[1]);
+      if (!["dial","answer","reject","hangup","dtmf","send_sms","gps_request","wifi_config","wifi_connect","wifi_disconnect"].includes(value.type)) return json(res,400,{error:"unsupported command"});
+      const d=devices.get(id);
+      if(value.type==="dial" && sipBridgeEnabled(d)){
+        try {
+          const session=await ensureRtpSession(id);
+          resetRtpSession(session);
+          const result=await sipServer.invite(d,value.payload?.number,session);
+          return json(res,202,{accepted:true,command_id:result.command_id});
+        } catch(e) { return json(res,409,{error:e.message}); }
+      }
+      if(value.type==="hangup" && sipBridgeEnabled(d)){
+        // Tear down both legs from the first click.  Both operations are
+        // idempotent: the device stops cellular CC and exsip stops its SIP
+        // leg, while the gateway closes any outstanding SIP transaction.
+        const commandID=command(id,"hangup",value.payload||{});
+        const sipAccepted=sipServer.hangup(id);
+        if(commandID||sipAccepted)return json(res,202,{accepted:true,command_id:commandID||crypto.randomUUID()});
+      }
+      const commandID=command(id,value.type,value.payload||{}); return commandID ? json(res,202,{accepted:true,command_id:commandID}) : json(res,409,{error:"device offline"});
+    }
     return json(res,404,{error:"not found"});
   } catch (e) { return json(res,400,{error:e.message}); }
 });
@@ -295,11 +366,11 @@ mediaWss.on("connection",(ws,deviceID)=>{
   mediaPeers.set(deviceID,ws);
   const stats=getMediaStats(deviceID);
   const device=devices.get(deviceID); if(device)device.media_stats=stats;
-  console.log(`media connected device=${deviceID} transport=${carrierRtpEnabled(device)?"carrier_rtp":"websocket_pcm"}`);
+  console.log(`media connected device=${deviceID} transport=${rtpMediaEnabled(device)?(carrierRtpEnabled(device)?"carrier_rtp":"sip_rtp"):"websocket_pcm"}`);
   ws.on("message",(raw,isBinary)=>{
     if(!isBinary)return;
     const d=devices.get(deviceID);
-    if(carrierRtpEnabled(d)){
+    if(rtpMediaEnabled(d)){
       if(!sendPcmToCarrier(deviceID,raw))stats.rtp_tx_errors++;
       return;
     }
@@ -369,9 +440,9 @@ mediaWss.on("connection",(ws,deviceID)=>{
           location: identity.status?.location || null,
           wifi: identity.status?.wifi || null,
           media_backend: identity.status?.media_backend || null,
-          media_transport: identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : "websocket_pcm",
+          media_transport: identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : identity.status?.media_backend === "sip_bridge" ? "sip_rtp" : "websocket_pcm",
           media_rate: 8000,
-          media_uplink_rate: identity.status?.media_backend === "carrier_rtp" ? 8000 : 16000,
+          media_uplink_rate: identity.status?.media_backend === "carrier_rtp" || identity.status?.media_backend === "sip_bridge" ? 8000 : 16000,
           media_stats: emptyMediaStats(),
           rtp_ready: false,
           events: [],
@@ -406,7 +477,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
       if (msg.type === "device.command_result" && msg.payload?.payload?.fix_state) device.location = msg.payload.payload;
       if (msg.type === "media.open" || msg.type === "media.ready" || msg.type === "media.early") {
         device.media_rate=Number(msg.payload?.downlink_sample_rate || msg.payload?.sample_rate) || 8000;
-        device.media_uplink_rate=Number(msg.payload?.uplink_sample_rate) || (carrierRtpEnabled(device)?8000:16000);
+        device.media_uplink_rate=Number(msg.payload?.uplink_sample_rate) || (rtpMediaEnabled(device)?8000:16000);
         if(msg.payload?.backend)device.media_backend=msg.payload.backend;
         if(msg.payload?.transport)device.media_transport=msg.payload.transport;
       }
@@ -429,4 +500,5 @@ server.listen(PORT,()=>{
   console.log(`AirSIM Air8000 VPS gateway listening on ${PORT}`);
   const host=rtpAdvertiseHost();
   console.log(host?`Carrier RTP: ${host} UDP ${RTP_PORT_BASE}-${RTP_PORT_BASE+RTP_PORT_COUNT-1}`:"Carrier RTP disabled: set RTP_PUBLIC_HOST");
+  sipServer.start().then(()=>console.log(`SIP UDP registrar listening on ${SIP_PORT}`)).catch(err=>console.error(`SIP UDP unavailable on ${SIP_PORT}: ${err.message}`));
 });
