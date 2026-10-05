@@ -27,6 +27,7 @@ function M:supported()
         self.cc.AUDIO_MODE_BRIDGE_PCM~=nil and
         has(self.cc,"bridgePcmStats") and has(self.cc,"bridgeAudioStop") and
         has(self.voip,"setAudioMode") and self.voip.AUDIO_MODE_BRIDGE~=nil and
+        has(self.voip,"pcmIn") and has(self.voip,"pcmOut") and
         has(self.voip,"start") and has(self.voip,"stop") and has(self.voip,"on")
 end
 
