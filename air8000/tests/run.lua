@@ -111,6 +111,8 @@ ok("carrier RTP backend selects native bridge without fake tone", function()
   local voip={
     AUDIO_MODE_BRIDGE=1, PCMU=0,
     setAudioMode=function(mode) calls.mode=mode; return true end,
+    pcmIn=function() return 0 end,
+    pcmOut=function() return nil end,
     on=function(name,cb) calls["on_"..name]=cb end,
     start=function(opts) calls.start=opts; return true end,
     stop=function() calls.stop=true; return true end,
