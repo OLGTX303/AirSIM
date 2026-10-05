@@ -1,14 +1,14 @@
 local calls = require("protocol.calls")
 local M = {}
 
-function M.new(cc, emit, now)
+function M.new(cc,emit,now)
     return setmetatable({
         cc=cc,
         emit=emit or function() end,
         now=now or function() return os.time()*1000 end,
         current=nil,
         audio_started=false,
-    }, {__index=M})
+    },{__index=M})
 end
 
 function M:transition(event,data)
@@ -93,20 +93,30 @@ function M:dtmf(digit)
     return self.cc.dtmf(0,digit)~=false
 end
 
-function M:emit_audio_start(source)
+function M:emit_audio_start(source,value,session)
     if not self.current or self.audio_started then return end
     self.audio_started=true
-    self.emit("call.audio_start",{call=self.current,event=source or "audio_start"})
+    self.emit("call.audio_start",{call=self.current,event=source or "audio_start",value=value,session=session})
 end
 
-function M:on_cc(status)
+function M:on_cc(status,value,session)
+    if status=="PLAY" then
+        if self.current then
+            self.emit("call.media",{call=self.current,event=tonumber(value)==0 and "play_stop" or "play",value=value,session=session})
+        end
+        return
+    end
+    if status=="PLAY_STOP" then
+        if self.current then self.emit("call.media",{call=self.current,event="play_stop",value=value,session=session}) end
+        return
+    end
     if status=="AUDIO_START" then
-        if log then log.info("airsim.call","modem_event","AUDIO_START") end
-        self:emit_audio_start("audio_start")
+        if log then log.info("airsim.call","modem_event","AUDIO_START",tostring(value or ""),tostring(session or "")) end
+        self:emit_audio_start("audio_start",value,session)
         return
     end
     if status=="EXT_SRC_DONE" then
-        if self.current then self.emit("call.audio_source_done",{call=self.current}) end
+        if self.current then self.emit("call.audio_source_done",{call=self.current,value=value,session=session}) end
         return
     end
 
@@ -119,22 +129,25 @@ function M:on_cc(status)
         DISCONNECTED="remote_hangup",
         HANGUP_CALL_DONE="ended",
         CONNECTED="connected",
+        CONNECTED_NUMBER="connected",
     }
 
     if status=="INCOMINGCALL" and not self.current then
         self.current=calls.new(tostring(self.now()),"incoming",self.now())
         self.current.number=self.cc.lastNum and self.cc.lastNum()
+        self.current.session=session
         self.audio_started=false
-        self:transition("incoming")
+        self:transition("incoming",{value=value,session=session})
         return
     end
 
     local e=map[status]
     if not e or not self.current then return end
-    if log then log.info("airsim.call","modem_event",tostring(status)) end
+    if session~=nil then self.current.session=session end
+    if log then log.info("airsim.call","modem_event",tostring(status),tostring(value or ""),tostring(session or "")) end
 
     if e=="connected" and self.current.state=="CONNECTED" then
-        if status=="SPEECH_START" then self:emit_audio_start("speech_start_fallback") end
+        if status=="SPEECH_START" then self:emit_audio_start("speech_start_fallback",value,session) end
         return
     end
 
@@ -142,21 +155,23 @@ function M:on_cc(status)
         local state=self.current.state
         if state=="DISCONNECTING" or state=="INCOMING" or state=="RINGING_OUT" or
            state=="DIALING" or state=="CONNECTING" or state=="CONNECTED" then
-            self:transition("ended")
+            self:transition("ended",{value=value,session=session})
         end
     elseif e=="remote_hangup" then
-        if self:transition("remote_hangup") and self.current then self:transition("ended") end
+        if self:transition("remote_hangup",{value=value,session=session}) and self.current then
+            self:transition("ended",{value=value,session=session})
+        end
     elseif e=="failed" then
-        self:transition("failed")
+        self:transition("failed",{value=value,session=session})
     elseif e=="ringing" then
-        self:transition("ringing")
+        self:transition("ringing",{value=value,session=session})
     elseif e=="answer_done" then
-        self.emit("call.state",{call=self.current,event="answer_done"})
+        self.emit("call.state",{call=self.current,event="answer_done",data={value=value,session=session}})
     else
-        self:transition(e)
+        self:transition(e,{value=value,session=session})
     end
 
-    if status=="SPEECH_START" then self:emit_audio_start("speech_start_fallback") end
+    if status=="SPEECH_START" then self:emit_audio_start("speech_start_fallback",value,session) end
 
     if self.current and (self.current.state=="ENDED" or self.current.state=="FAILED") then
         self.current=nil
