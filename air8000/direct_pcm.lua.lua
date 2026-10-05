@@ -1,1 +1,1 @@
-return dofile("media/direct_pcm.lua")
+return dofile("media.direct_pcm.lua")
