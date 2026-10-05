@@ -130,6 +130,17 @@ ok("carrier RTP backend selects native bridge without fake tone", function()
   assert(calls.stop and calls.bridgeStop)
 end)
 
+ok("SIP bridge uses official ringback and reports negotiated VoLTE rate", function()
+  local fp=assert(io.open("main.lua","r"))
+  local src=fp:read("*a")
+  fp:close()
+  assert(src:find('cc.bridgeTone',1,true))
+  assert(src:find('sip_183_media_ready',1,true))
+  assert(src:find('cc.quality',1,true))
+  assert(src:find('target_cellular_sample_rate=16000',1,true))
+  assert(src:find('wideband_volte',1,true))
+end)
+
 ok("Wi-Fi telemetry reports actual IP-ready connection", function()
   local W=require("system.wifi_status")
   local wlan={
