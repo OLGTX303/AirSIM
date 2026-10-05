@@ -22,6 +22,8 @@ assert.match(server,/const browserRate=direct \?/);
 assert.match(server,/media\.transport_change/);
 assert.match(server,/frame_bytes\)!==rate\*2\*20\/1000/);
 assert.match(server,/audio_concealment_frames/);
+assert.match(server,/function concealPcm16\(previous, frameIndex\)/);
+assert.match(server,/session\.lastPcm8=pcm8/);
 assert.match(server,/function updatePcmMetrics/);
 assert.match(server,/downlink_peak/);
 assert.match(server,/uplink_peak/);

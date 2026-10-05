@@ -34,6 +34,15 @@ const MEDIA_FRAME_MS = 20;
 const MEDIA_MAX_CATCHUP_FRAMES = 5;
 const PCMU_FRAME_BYTES = 320; // 160 S16LE samples at 8 kHz
 const SILENT_PCMU_FRAME = Buffer.alloc(PCMU_FRAME_BYTES);
+function concealPcm16(previous, frameIndex) {
+  if (!previous || previous.length!==PCMU_FRAME_BYTES) return SILENT_PCMU_FRAME;
+  const gain=Math.max(0,1-(frameIndex/5));
+  const out=Buffer.allocUnsafe(previous.length);
+  for(let i=0;i<previous.length;i+=2){
+    out.writeInt16LE(Math.round(previous.readInt16LE(i)*gain),i);
+  }
+  return out;
+}
 
 function sameSecret(a, b) {
   const left = Buffer.from(String(a || "")); const right = Buffer.from(String(b || ""));
@@ -192,6 +201,8 @@ async function ensureRtpSession(deviceID) {
     rxHoldMs:600,
     rxMissingGraceMs:80,
     rxMissingSince:0,
+    lastPcm8:null,
+    concealFrames:0,
     lastArrivalMs:0,
     lastRtpTimestamp:null,
     jitterMs:0,
@@ -310,6 +321,8 @@ function resyncCarrierDownlink(session) {
   session.rxGapOpen=false;
   session.rxStarted=false;
   session.rxMissingSince=0;
+  session.lastPcm8=null;
+  session.concealFrames=0;
   session.lastArrivalMs=0;
   session.lastRtpTimestamp=null;
 }
@@ -398,6 +411,8 @@ function playoutCarrierDownlink(session) {
     session.rxMissingSince=0;
     session.rxGapOpen=false;
     pcm8=decodePcmuPayload(payload);
+    session.lastPcm8=pcm8;
+    session.concealFrames=0;
   }else if(session.rxQueue.size===0){
     // No later packet means no sequence gap has been proven. This is an idle
     // carrier period, not packet loss; keep the browser clocked but retain
@@ -411,11 +426,13 @@ function playoutCarrierDownlink(session) {
     // sequence in that gap is concealed on its own tick without a new grace
     // wait, so one lost packet costs one 20 ms frame rather than several.
     if(!session.rxMissingSince)session.rxMissingSince=now;
-    pcm8=SILENT_PCMU_FRAME;
-    if(session.rxGapOpen || now-session.rxMissingSince>=session.rxMissingGraceMs){
+    const declared=session.rxGapOpen || now-session.rxMissingSince>=session.rxMissingGraceMs;
+    pcm8=declared?concealPcm16(session.lastPcm8,session.concealFrames):session.lastPcm8 || SILENT_PCMU_FRAME;
+    if(declared){
       stats.rtp_lost_packets++;
       stats.audio_concealment_frames++;
       session.rxGapOpen=true;
+      session.concealFrames++;
     } else {
       advanceSequence=false;
     }
