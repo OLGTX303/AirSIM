@@ -204,7 +204,10 @@ async function playPcm(buffer){
     const pending=voice.workletPending||new Float32Array(0);
     const merged=new Float32Array(pending.length+samples.length);
     merged.set(pending);merged.set(samples,pending.length);
-    const batch=Math.max(samples.length,Math.round(voice.ctx.sampleRate*0.04));
+    // Keep transport-to-worklet blocks at one 20 ms frame. Larger 40 ms
+    // messages make speech arrive in audible chunks even when the queue is
+    // otherwise healthy.
+    const batch=Math.max(samples.length,Math.round(voice.ctx.sampleRate*0.02));
     let offset=0;
     while(merged.length-offset>=batch){
       const chunk=merged.slice(offset,offset+batch);

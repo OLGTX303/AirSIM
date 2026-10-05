@@ -50,7 +50,7 @@ assert.match(page,/voice\.playUnderruns\+\+/);
 assert.match(page,/createScriptProcessor\(1024,1,1\)/);
 assert.match(page,/registerProcessor\('airsim-playback'/);
 assert.match(page,/workletPending:new Float32Array\(0\)/);
-assert.match(page,/Math\.round\(voice\.ctx\.sampleRate\*0\.04\)/);
+assert.match(page,/Math\.round\(voice\.ctx\.sampleRate\*0\.02\)/);
 assert.doesNotMatch(page,/!this\.q\.length\)\{this\.started=false;this\.underruns\+\+/);
 assert.match(page,/!this\.q\.length\)\{this\.underruns\+\+/);
 assert.match(page,/automatic 45 s recovery/);
