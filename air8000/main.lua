@@ -1,4 +1,4 @@
-PROJECT="airsim-air8000"; VERSION="001.001.001"
+PROJECT="airsim-air8000"; VERSION="001.002.000"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
@@ -54,7 +54,7 @@ local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=web
 local media_backend=media_manager.select(requested_media_backend,caps)
 if log then log.info("airsim.media","selection",requested_media_backend,tostring(media_backend or "none"),"sip_enabled",tostring(sip_cfg.enabled==true),"exsip",tostring(exsip~=nil)) end
 local device_identity=identity.read(mobile,mcu,cfg)
-local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp" or media_backend=="sip_bridge"
+local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp" or media_backend=="sip_bridge"; status.target_cellular_voice_rate=16000; status.wideband_volte=false
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
 
 local function now_ms()
@@ -95,9 +95,87 @@ local uplink_frames=0
 local uplink_bytes=0
 local downlink_pending=""
 
-local function disable_bridge_tone()
-    if cc and type(cc.bridgeTone)=="function" then pcall(cc.bridgeTone,false) end
-    if voip and type(voip.bridgeTone)=="function" then pcall(voip.bridgeTone,false) end
+local bridge_tone_active=false
+local bridge_tone_generation=0
+
+local function set_bridge_tone(enabled,reason)
+    if media_backend~="sip_bridge" then enabled=false end
+    bridge_tone_generation=bridge_tone_generation+1
+    local generation=bridge_tone_generation
+
+    local function apply()
+        if generation~=bridge_tone_generation then return false end
+        local applied=false
+        if cc and type(cc.bridgeTone)=="function" then
+            local ok,result=pcall(cc.bridgeTone,enabled)
+            applied=ok and result~=false
+        elseif voip and type(voip.bridgeTone)=="function" then
+            local ok,result=pcall(voip.bridgeTone,enabled)
+            applied=ok and result~=false
+        end
+        if applied then
+            bridge_tone_active=enabled
+            if log then log.info("airsim.media","bridge_ringback",enabled and "on" or "off",tostring(reason or "")) end
+        end
+        return applied
+    end
+
+    if not enabled then
+        apply()
+        return true
+    end
+
+    -- cc.bridgeTone() only starts after the VoIP RTP engine is RUNNING. 183
+    -- media-ready can arrive a few milliseconds earlier, so retry briefly.
+    if sys and sys.taskInit then
+        sys.taskInit(function()
+            for _=1,20 do
+                if generation~=bridge_tone_generation then return end
+                if apply() then return end
+                if sys.wait then sys.wait(50) end
+            end
+            if log then log.warn("airsim.media","bridge_ringback_start_timeout") end
+        end)
+        return true
+    end
+    return apply()
+end
+
+local function disable_bridge_tone(reason)
+    return set_bridge_tone(false,reason or "disable")
+end
+
+local function cellular_voice_rate()
+    if not cc or type(cc.quality)~="function" then return 0 end
+    local ok,value=pcall(cc.quality)
+    if not ok then return 0 end
+    value=tonumber(value) or 0
+    if value==1 then return 8000 end
+    if value==2 then return 16000 end
+    if value>=8000 then return value end
+    return 0
+end
+
+local function publish_voice_quality(reason)
+    local rate=cellular_voice_rate()
+    if rate<=0 then return nil end
+    local wideband=rate>=16000
+    status.cellular_voice_rate=rate
+    status.wideband_volte=wideband
+    status.voice_codec=wideband and "AMR-WB" or "AMR-NB"
+    if _G.relay_client then
+        _G.relay_client:send("media.voice_quality",{
+            backend=media_backend,
+            cellular_sample_rate=rate,
+            wideband_volte=wideband,
+            voice_codec=status.voice_codec,
+            target_cellular_sample_rate=16000,
+            sip_rtp_sample_rate=media_backend=="sip_bridge" and 8000 or rate,
+            reason=reason,
+        },os.time()*1000)
+    end
+    if log then log.info("airsim.media","volte_quality",status.voice_codec,rate,tostring(reason or "")) end
+    return rate
 end
 
 local function init_stock_sip_bridge()
@@ -129,8 +207,8 @@ local function init_stock_sip_bridge()
     }
     local ok,result=pcall(exsip.init,init_config)
     if not ok or result==false then return false,ok and "exsip_init_failed" or tostring(result) end
-    disable_bridge_tone()
-    if log then log.info("airsim.media","backend","sip_bridge","early_media",true) end
+    disable_bridge_tone("bridge_init")
+    if log then log.info("airsim.media","backend","sip_bridge","early_media",true,"target_volte_hz",16000) end
     return true
 end
 
@@ -239,9 +317,13 @@ local function announce_media(kind)
             sample_rate=8000,
             downlink_sample_rate=8000,
             uplink_sample_rate=8000,
+            cellular_sample_rate=cellular_voice_rate(),
+            target_cellular_sample_rate=16000,
+            wideband_volte=cellular_voice_rate()>=16000,
             channels=1,
             bits=16,
             codec="PCMU",
+            cellular_codec=cellular_voice_rate()>=16000 and "AMR-WB" or "AMR-NB/negotiating",
             format="pcm_s16le",
             frame_duration_ms=20,
         },os.time()*1000)
@@ -324,9 +406,12 @@ local function emit_event(kind,payload)
             -- send 200/ACK only after the carrier reports connected, and tear
             -- down both legs when either side ends.
             if payload.event=="connected" then
+                disable_bridge_tone("cellular_connected")
                 if exsip then pcall(exsip.accept) end
+                if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"connected") end
             elseif payload.event=="failed" or payload.event=="hangup" or
-                   payload.event=="reject" or payload.event=="remote_hangup" then
+                   payload.event=="reject" or payload.event=="remote_hangup" or payload.event=="ended" then
+                disable_bridge_tone("call_end")
                 if exsip then pcall(exsip.hangUp) end
             end
         else
@@ -343,8 +428,10 @@ local function emit_event(kind,payload)
         -- bridge and produces "cc is not true start"/extern_source_failed.
         if media_backend~="sip_bridge" then
             start_uplink_source(payload.call)
-        elseif log then
-            log.info("airsim.media","sip_bridge_audio_start")
+        else
+            disable_bridge_tone("audio_start")
+            if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"audio_start") end
+            if log then log.info("airsim.media","sip_bridge_audio_start") end
         end
     elseif kind=="call.media" and media_backend=="carrier_rtp" then
         announce_media(payload.event=="play" and "media.early" or "media.phase")
@@ -373,8 +460,17 @@ if media_backend=="sip_bridge" and exsip then
             end
         elseif event_type=="media" and action=="ready" then
             announce_media("media.open")
+            if _G.call_service and _G.call_service.current then
+                set_bridge_tone(true,"sip_183_media_ready")
+            end
         elseif event_type=="media" and action=="stop" then
+            disable_bridge_tone("sip_media_stop")
             announce_media("media.close")
+        elseif event_type=="voip" and action=="state" and tostring(payload)=="started" then
+            if _G.call_service and _G.call_service.current and
+               _G.call_service.current.state~="CONNECTED" then
+                set_bridge_tone(true,"voip_started")
+            end
         elseif event_type=="call" and (action=="ended" or action=="failed") then
             if _G.call_service.current then pcall(_G.call_service.hangup) end
         elseif event_type=="error" and log then
