@@ -122,3 +122,73 @@ selected backend.
    usable GNSS antenna/view of sky.
 6. On loss of fix, the portal must show `lost`; closing the receiver must not
    erase the last valid coordinates already reported.
+
+
+## Smooth SIP bridge voice + wideband VoLTE acceptance
+
+The stock Air8000 VoIP engine currently exposes PCMU/PCMA RTP at 8 kHz. Do not
+label that RTP leg as 16 kHz. The cellular CC leg may independently negotiate
+AMR-WB at 16 kHz; the OpenLuat CC/SIP bridge resamples 16 kHz CC PCM to the
+8 kHz G.711 RTP leg.
+
+### Ringback
+
+For SIP bridge calls, after the 183 media path is ready AirSIM enables the
+official `cc.bridgeTone(true)` bridge ringback. This is generated inside the
+Air8000 CC/VoIP bridge, not in browser JavaScript. The firmware automatically
+stops it when real CC downlink PCM is observed, and AirSIM also stops it at
+CONNECTED/AUDIO_START or teardown.
+
+Expected log before answer when the network supplies only ringing signalling:
+
+```text
+airsim.media bridge_ringback on sip_183_media_ready
+```
+
+When real downlink or speech begins:
+
+```text
+airsim.media bridge_ringback off audio_start
+```
+
+### RTP smoothness
+
+The LAN/VPS gateway must:
+
+- buffer six 20 ms downlink RTP packets before playout (about 120 ms);
+- reorder RTP by sequence number;
+- clock exactly one downlink PCM frame every 20 ms;
+- use silence concealment for a missing 20 ms packet;
+- clock exactly one uplink PCMU RTP frame every 20 ms instead of draining the
+  browser microphone queue in a burst.
+
+The portal adds another approximately 140 ms adaptive WebAudio scheduling lead
+and re-buffers after an underrun.
+
+Check these live diagnostics during a call:
+
+- RTP jitter should normally remain well below the playout target;
+- late/lost/concealment counters should increase only occasionally;
+- browser underruns should remain at or close to zero;
+- uplink dropped frames should remain zero during a healthy LAN call.
+
+### 16 kHz cellular VoLTE
+
+After AUDIO_START AirSIM calls `cc.quality()`:
+
+- `1` -> 8 kHz AMR-NB;
+- `2` -> 16 kHz AMR-WB;
+- another sample-rate value -> that explicit rate.
+
+For a real wideband call expect:
+
+```text
+airsim.media volte_quality AMR-WB 16000 audio_start
+```
+
+The portal must display **Cellular VoLTE: 16000 Hz · AMR-WB · WIDEBAND**.
+
+If it reports 8000 Hz / AMR-NB, the modem/carrier negotiated narrowband for
+that call. LuatOS does not expose a supported API to force AMR-WB; carrier,
+IMS profile, radio/network conditions and the remote endpoint participate in
+codec negotiation.
