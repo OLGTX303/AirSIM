@@ -192,3 +192,60 @@ If it reports 8000 Hz / AMR-NB, the modem/carrier negotiated narrowband for
 that call. LuatOS does not expose a supported API to force AMR-WB; carrier,
 IMS profile, radio/network conditions and the remote endpoint participate in
 codec negotiation.
+
+
+## Web voice parity with iOS and restart recovery
+
+The web voice path now follows the same design principles used by the iOS
+`AudioSessionController`:
+
+- continuous queued playback instead of creating one speaker object per network packet;
+- bounded playback queue with drop/underrun accounting;
+- microphone echo cancellation, noise suppression and automatic gain control;
+- 80 Hz high-pass and approximately 3.4 kHz low-pass conditioning for the
+  current 8 kHz PCMU leg;
+- automatic transport recovery for up to 45 seconds.
+
+### Web playback acceptance
+
+During a healthy call:
+
+- browser underruns should stay at or near zero;
+- browser queue drops should stay at zero;
+- RTP lost/late/concealment counters should remain low;
+- voice should continue smoothly when the main browser thread is briefly busy.
+
+The AudioWorklet keeps an approximately 80 ms browser playout queue. The
+gateway still performs RTP sequence reordering and jitter buffering before
+frames reach the browser.
+
+### Gateway restart acceptance
+
+1. Establish a cellular call from the web and verify two-way audio.
+2. Restart only `tools/air8000-vps`; do not reboot the Air8000.
+3. The browser media WebSocket should close and enter automatic recovery.
+4. The Air8000 relay reconnects and receives a new `server_instance_id`.
+5. AirSIM restarts only the SIP service, preserving the cellular CC call.
+6. The Air8000 immediately REGISTERs to the new SIP process.
+7. The browser retries media tickets for up to 45 seconds.
+8. The gateway sends an INVITE with `X-AirSIM-Resume: 1`.
+9. The Air8000 attaches the new SIP/RTP media dialog to the existing CC call
+   without placing a second cellular call.
+10. Audio should resume automatically.
+
+Expected device logs include:
+
+```text
+airsim.sip refresh_start gateway_restarted
+airsim.sip refresh_done true gateway_restarted
+airsim.sip resume_existing_cc CONNECTED
+```
+
+The portal **Audio recovery** card increments `server resumes` when the new
+gateway creates a replacement media dialog.
+
+### Important regression
+
+Requesting a new browser media ticket during an existing SIP call must not
+clear `session.remote`. Earlier versions reset the RTP session on every media
+ticket, which could permanently mute an otherwise healthy active call.
