@@ -10,10 +10,16 @@ assert.match(server,/rtp_jitter_ms/);
 assert.match(server,/audio_concealment_frames/);
 assert.doesNotMatch(server,/while\(session\.pendingUplink\.length>=320\)/);
 
-assert.match(page,/targetLead:0\.14/);
-assert.match(page,/minLead:0\.06/);
+assert.match(page,/targetLead:0\\.08/);
+assert.match(page,/minLead:0\\.04/);
 assert.match(page,/voice\.playUnderruns\+\+/);
 assert.match(page,/createScriptProcessor\(1024,1,1\)/);
+assert.match(page,/registerProcessor\('airsim-playback'/);
+assert.match(page,/automatic 45 s recovery/);
+assert.match(page,/media-stalled/);
+assert.match(server,/SERVER_INSTANCE_ID/);
+assert.match(server,/sipServer\.resume\(d,session\)/);
+assert.match(server,/Do not clear session\.remote/);
 assert.match(page,/Cellular VoLTE/);
 
 console.log("Air8000 paced voice-path tests passed");
