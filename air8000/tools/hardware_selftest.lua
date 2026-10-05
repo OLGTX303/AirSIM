@@ -1,6 +1,6 @@
 local capability=require("system.capability")
-local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2})
-local function line(name,value) print(string.format("%-16s %s",name,value and "PASS" or "UNSUPPORTED")) end
+local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2,voip=voip})
+local function line(name,value) print(string.format("%-20s %s",name,value and "PASS" or "UNSUPPORTED")) end
 print("[AIRSIM SELFTEST]")
 line("Firmware",true)
 line("SIM",mobile~=nil)
@@ -11,6 +11,8 @@ line("GNSS",caps.gnss)
 line("Wi-Fi",caps.wifi)
 line("TLS/WSS",caps.websocket)
 line("Direct PCM",caps.direct_pcm)
+line("Carrier RTP PCM",caps.carrier_rtp_pcm)
+line("Real early media",caps.real_early_media)
 line("SIP Bridge",caps.sip_bridge)
 line("FOTA",caps.fota)
-print("Overall ......... "..(caps.required_ok and "READY" or "NOT READY"))
+print("Overall ............. "..(caps.required_ok and "READY" or "NOT READY"))
