@@ -9,6 +9,7 @@ local ws_transport=require("transport.ws")
 local relay_module=require("transport.relay")
 local reconnect=require("transport.reconnect")
 local gnss_module=require("gnss.gnss_service")
+local wifi_status=require("system.wifi_status")
 local call_module=require("cellular.call")
 local sms_module=require("cellular.sms")
 local pcm_module=require("media.direct_pcm")
@@ -23,10 +24,38 @@ if fskv then
     }
 end
 if kv_api then cfg=settings.load(kv_api,cfg) end
-local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2,voip=voip})
+local gnss_api=_G.exgnss
+if not gnss_api then
+    local ok,module=pcall(require,"exgnss")
+    if ok and module then gnss_api=module; _G.exgnss=module end
+end
+if not gnss_api then gnss_api=libgnss end
+local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2,voip=voip})
 local media_backend=media_manager.select(cfg.media_backend or "auto",caps)
 local device_identity=identity.read(mobile,mcu,cfg)
 local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp"
+local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
+
+local function now_ms()
+    return os.time()*1000
+end
+
+local function wifi_snapshot(event,data)
+    local snap=wifi_status.snapshot(wlan,cfg,wifi_cache,event,data,now_ms())
+    status.wifi_state=snap.state
+    status.wifi=snap
+    return snap
+end
+
+local function publish_wifi(event,data)
+    local snap=wifi_snapshot(event,data)
+    if _G.relay_client then _G.relay_client:send("device.wifi",snap,now_ms()) end
+    if log and event~="POLL" then log.info("airsim.wifi",snap.state,tostring(snap.ssid or ""),tostring(snap.ip or ""),tostring(snap.rssi or "")) end
+    return snap
+end
+
+if wlan and wlan.init then pcall(wlan.init) end
+wifi_snapshot("BOOT")
 if wlan and wlan.connect and cfg.wifi and type(cfg.wifi.ssid)=="string" and cfg.wifi.ssid ~= "" then
     local stored_bssid=cfg.wifi.bssid
     local bssid=type(stored_bssid)=="string" and stored_bssid:match("^[%da-fA-F]+$") and #stored_bssid==12 and string.fromHex(stored_bssid) or nil
@@ -208,7 +237,19 @@ local function emit_event(kind,payload)
 end
 _G.call_service=call_module.new(cc,emit_event)
 _G.sms_service=sms_module.new(sms,function(kind,payload) if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end end,cfg.limits and cfg.limits.max_sms_body)
-_G.gnss_service=gnss_module.new(libgnss or exgnss,cfg.location_policy)
+_G.gnss_service=gnss_module.new(gnss_api,cfg.location_policy)
+status.gnss_state=_G.gnss_service.state
+status.location=_G.gnss_service.last
+
+local function publish_location(sample)
+    sample=sample or (_G.gnss_service and _G.gnss_service.last)
+    if not sample then return nil end
+    status.gnss_state=sample.fix_state or (_G.gnss_service and _G.gnss_service.state) or "unknown"
+    status.location=sample
+    if _G.relay_client then _G.relay_client:send("device.location",sample,now_ms()) end
+    if log then log.info("airsim.gnss",tostring(sample.fix_state or "unknown"),tostring(sample.latitude or ""),tostring(sample.longitude or ""),tostring(sample.satellites or "")) end
+    return sample
+end
 
 local function send_command_result(message_id, ok, error_message, payload)
     if _G.relay_client then _G.relay_client:send("device.command_result",{command_id=message_id,ok=ok,error=error_message,payload=payload},os.time()*1000) end
@@ -228,11 +269,67 @@ local function dispatch_call_command(message_id, fn)
         else send_command_result(message_id,result == true, result == true and nil or tostring(err or "call_failed"),nil) end
     end)
 end
-local function save_wifi_config(ssid, password, bssid, security)
-    if type(ssid) ~= "string" or #ssid == 0 or #ssid > 64 or type(password) ~= "string" or #password > 128 then return false, "invalid_wifi" end
+local function save_wifi_config(ssid,password,bssid,security)
+    if type(ssid)~="string" or #ssid==0 or #ssid>64 or type(password)~="string" or #password>128 then return false,"invalid_wifi" end
     cfg.wifi={ssid=ssid,password=password,bssid=bssid,security=security or "auto"}
+    wifi_cache.ssid=ssid
     if kv_api and kv_api.set then kv_api:set("config",cfg) end
     return true
+end
+
+local function run_async(fn)
+    if sys and sys.taskInit then sys.taskInit(fn) else fn() end
+end
+
+local function handle_gps_request(message_id)
+    run_async(function()
+        local started,start_error=_G.gnss_service:start()
+        if not started then
+            local failed={fix=false,fix_state="unavailable",error=start_error,timestamp=now_ms()}
+            publish_location(failed)
+            send_command_result(message_id,false,start_error or "gnss_unavailable",failed)
+            return
+        end
+
+        publish_location({fix=false,fix_state="searching",timestamp=now_ms()})
+        local sample
+        for i=1,60 do
+            sample=_G.gnss_service:sample(now_ms())
+            if sample and sample.fix then break end
+            if i==1 or i%5==0 then publish_location(sample) end
+            if sys and sys.wait then sys.wait(1000) end
+        end
+        sample=sample or {fix=false,fix_state="lost",timestamp=now_ms()}
+        publish_location(sample)
+        send_command_result(message_id,sample.fix==true,sample.fix and nil or "gnss_fix_timeout",sample)
+    end)
+end
+
+local function handle_wifi_connect(message_id,p)
+    run_async(function()
+        local saved,save_error=save_wifi_config(p.ssid,p.password,p.bssid,p.security)
+        if not saved then send_command_result(message_id,false,save_error); return end
+        publish_wifi("CONNECTING",p.ssid)
+
+        local binary_bssid=type(p.bssid)=="string" and p.bssid:match("^[%da-fA-F]+$") and #p.bssid==12 and string.fromHex(p.bssid) or nil
+        local initiated
+        if binary_bssid then initiated=wlan and wlan.connect and wlan.connect(p.ssid,p.password,1,binary_bssid)
+        else initiated=wlan and wlan.connect and wlan.connect(p.ssid,p.password,1) end
+        if initiated==false then
+            local snap=publish_wifi("DISCONNECTED","connect_rejected")
+            send_command_result(message_id,false,"wifi_connect_failed",snap)
+            return
+        end
+
+        local snap
+        for _=1,40 do
+            snap=wifi_snapshot("POLL")
+            if snap.connected then break end
+            if sys and sys.wait then sys.wait(500) end
+        end
+        snap=publish_wifi(snap and snap.connected and "IP_READY" or "POLL")
+        send_command_result(message_id,snap.connected==true,snap.connected and nil or "wifi_connect_timeout",snap)
+    end)
 end
 local function handle_relay_message(raw,fin,opcode)
     if tonumber(opcode)==2 then
@@ -289,32 +386,18 @@ local function handle_relay_message(raw,fin,opcode)
     if msg.type == "command.hangup" then dispatch_call_command(id,function() return _G.call_service:hangup() end); return end
     if msg.type == "command.dtmf" then dispatch_call_command(id,function() return _G.call_service:dtmf(p.digit) end); return end
     if msg.type == "command.send_sms" then send_command_result(id,_G.sms_service:send(id,p.number,p.body),nil); return end
-    if msg.type == "command.gps_request" then
-        local started,start_error=_G.gnss_service:start()
-        local sample=nil
-        if started then
-            for _=1,15 do
-                sample=_G.gnss_service:sample(os.time()*1000)
-                if sample and sample.fix_state=="fixed" then break end
-                sys.wait(1000)
-            end
-        end
-        send_command_result(id,started and sample and sample.fix_state=="fixed",started and nil or start_error or "gnss_unavailable",sample)
+    if msg.type == "command.gps_request" then handle_gps_request(id); return end
+    if msg.type == "command.wifi_config" then
+        local snap=publish_wifi("POLL")
+        snap.security=cfg.wifi and cfg.wifi.security or nil
+        send_command_result(id,true,nil,snap)
         return
     end
-    if msg.type == "command.wifi_config" then send_command_result(id,true,nil,{configured=cfg.wifi and cfg.wifi.ssid~=nil,ssid=cfg.wifi and cfg.wifi.ssid,security=cfg.wifi and cfg.wifi.security}); return end
-    if msg.type == "command.wifi_connect" then
-        local saved,save_error=save_wifi_config(p.ssid,p.password,p.bssid,p.security)
-        if not saved then send_command_result(id,false,save_error); return end
-        local binary_bssid=type(p.bssid)=="string" and p.bssid:match("^[%da-fA-F]+$") and #p.bssid==12 and string.fromHex(p.bssid) or nil
-        local ok
-        if binary_bssid then ok=wlan and wlan.connect and wlan.connect(p.ssid,p.password,1,binary_bssid) else ok=wlan and wlan.connect and wlan.connect(p.ssid,p.password,1) end
-        send_command_result(id,ok==nil and true or ok,ok and nil or "wifi_connect_failed",{ssid=p.ssid,security=p.security or "auto"})
-        return
-    end
+    if msg.type == "command.wifi_connect" then handle_wifi_connect(id,p); return end
     if msg.type == "command.wifi_disconnect" then
-        local ok=wlan and wlan.disconnect and wlan.disconnect()
-        send_command_result(id,ok==nil and true or ok,ok and nil or "wifi_disconnect_failed")
+        local before=publish_wifi("DISCONNECTING")
+        send_command_result(id,true,nil,before)
+        if wlan and wlan.disconnect then wlan.disconnect() end
         return
     end
     send_command_result(id,false,"unsupported_command")
@@ -325,6 +408,7 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
         local ip_ready=false
         if sys.subscribe then
             sys.subscribe("IP_READY",function() ip_ready=true end)
+            sys.subscribe("IP_LOSE",function() ip_ready=false end)
         end
         local function network_ready()
             if ip_ready then return true end
@@ -355,7 +439,25 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
             end
             if log then log.info("airsim.relay", "network_ready") end
             local transport
-            transport=ws_transport.new(websocket,handle_relay_message,function() backoff:reset(); _G.relay_transport=transport; _G.relay_client=relay_module.new(cfg,transport); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp"; _G.relay_client:register(status) end,function(reason) stop_media(false); _G.relay_transport=nil; _G.relay_client=nil; if log then log.warn("airsim.relay", "disconnected", tostring(reason or "unknown")) end end)
+            transport=ws_transport.new(websocket,handle_relay_message,function()
+                backoff:reset()
+                _G.relay_transport=transport
+                _G.relay_client=relay_module.new(cfg,transport)
+                status.media_backend=media_backend
+                status.real_early_media=media_backend=="carrier_rtp"
+                status.wifi=wifi_snapshot("REGISTER")
+                status.wifi_state=status.wifi.state
+                status.gnss_state=_G.gnss_service and _G.gnss_service.state or status.gnss_state
+                status.location=_G.gnss_service and _G.gnss_service.last or status.location
+                _G.relay_client:register(status)
+                publish_wifi("REGISTER")
+                if status.location then publish_location(status.location) end
+            end,function(reason)
+                stop_media(false)
+                _G.relay_transport=nil
+                _G.relay_client=nil
+                if log then log.warn("airsim.relay","disconnected",tostring(reason or "unknown")) end
+            end)
             local ok=transport:connect(cfg.relay_url)
             if not ok and log then log.warn("airsim.relay", "connect_failed", tostring(cfg.relay_url)) end
             if ok then
@@ -375,5 +477,28 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
     end)
 end
 if log then log.info("airsim","Air8000A backend starting",PROJECT,VERSION) end
-if sys and sys.subscribe then sys.subscribe("CC_IND",function(s,value,session) if media_backend=="carrier_rtp" then carrier_rtp:on_cc(s,value,session) end; if _G.call_service then _G.call_service:on_cc(s,value,session) end end); sys.subscribe("SMS_INC",function(sender,body,ts) if _G.sms_service then _G.sms_service:on_receive(sender,body,ts) end end) end
+if sys and sys.subscribe then
+    sys.subscribe("CC_IND",function(s,value,session)
+        if media_backend=="carrier_rtp" then carrier_rtp:on_cc(s,value,session) end
+        if _G.call_service then _G.call_service:on_cc(s,value,session) end
+    end)
+    sys.subscribe("SMS_INC",function(sender,body,ts)
+        if _G.sms_service then _G.sms_service:on_receive(sender,body,ts) end
+    end)
+    sys.subscribe("WLAN_STA_INC",function(event,data)
+        publish_wifi(event,data)
+    end)
+    sys.subscribe("IP_READY",function()
+        if wlan and wlan.ready and wlan.ready() then publish_wifi("IP_READY") end
+    end)
+    sys.subscribe("IP_LOSE",function()
+        if not (wlan and wlan.ready and wlan.ready()) then publish_wifi("IP_LOSE") end
+    end)
+    sys.subscribe("GNSS_STATE",function(event,ticks)
+        if _G.gnss_service then publish_location(_G.gnss_service:on_state(event,now_ms())) end
+    end)
+end
+if sys and sys.timerLoopStart then
+    sys.timerLoopStart(function() publish_wifi("POLL") end,10000)
+end
 if sys and sys.run then sys.run() end
