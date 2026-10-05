@@ -35,7 +35,7 @@ function sameSecret(a, b) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location, wifi:d.wifi, media_backend:d.media_backend || d.status?.media_backend || null, media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, media_stats:d.media_stats || emptyMediaStats(), events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, media_backend:d.media_backend || d.status?.media_backend || null, media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, media_stats:d.media_stats || emptyMediaStats(), events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
 function emptyMediaStats() {
@@ -366,8 +366,8 @@ mediaWss.on("connection",(ws,deviceID)=>{
           firmware: identity.firmware,
           capabilities: identity.capabilities,
           status: identity.status || {},
-          location: null,
-          wifi: null,
+          location: identity.status?.location || null,
+          wifi: identity.status?.wifi || null,
           media_backend: identity.status?.media_backend || null,
           media_transport: identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : "websocket_pcm",
           media_rate: 8000,
@@ -390,9 +390,19 @@ mediaWss.on("connection",(ws,deviceID)=>{
         return;
       }
       device.last_seen = Date.now();
-      if (msg.type === "device.location" || msg.type === "event.location") device.location = msg.payload || msg.location;
-      if (msg.type === "device.status" || msg.type === "event.status") device.status = msg.payload || msg.status;
-      if (msg.type === "device.wifi" || msg.type === "event.wifi") device.wifi = msg.payload || msg.wifi;
+      if (msg.type === "device.location" || msg.type === "event.location") {
+        device.location=msg.payload || msg.location;
+        device.status={...(device.status||{}),location:device.location,gnss_state:device.location?.fix_state || device.status?.gnss_state};
+      }
+      if (msg.type === "device.status" || msg.type === "event.status") {
+        device.status=msg.payload || msg.status || {};
+        if(device.status.location)device.location=device.status.location;
+        if(device.status.wifi)device.wifi=device.status.wifi;
+      }
+      if (msg.type === "device.wifi" || msg.type === "event.wifi") {
+        device.wifi=msg.payload || msg.wifi;
+        device.status={...(device.status||{}),wifi:device.wifi,wifi_state:device.wifi?.state || device.status?.wifi_state};
+      }
       if (msg.type === "device.command_result" && msg.payload?.payload?.fix_state) device.location = msg.payload.payload;
       if (msg.type === "media.open" || msg.type === "media.ready" || msg.type === "media.early") {
         device.media_rate=Number(msg.payload?.downlink_sample_rate || msg.payload?.sample_rate) || 8000;
@@ -401,7 +411,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
         if(msg.payload?.transport)device.media_transport=msg.payload.transport;
       }
       if (msg.type === "media.rtp_config.ack") device.rtp_ready = msg.payload?.ok === true;
-      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "media.open", "media.early", "media.phase"].includes(msg.type)) {
+      if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase"].includes(msg.type)) {
         device.events = device.events || [];
         device.events.push({ type: msg.type, payload: msg.payload || {}, timestamp: msg.timestamp || Date.now() });
         if (device.events.length > 100) device.events.shift();
