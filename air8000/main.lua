@@ -37,10 +37,12 @@ if not gnss_api then
 end
 if not gnss_api then gnss_api=libgnss end
 local sip_cfg=type(cfg.sip)=="table" and cfg.sip or {}
-local requested_media_backend=cfg.media_backend or "auto"
--- In auto mode, media_manager chooses the native CC PCM bridge first.  The
--- stock CC<->SIP bridge remains available when media_backend is explicitly
--- set to sip_bridge; merely having exsip credentials must not override auto.
+-- Use the native carrier PCM bridge for this Air8000 build.  This is
+-- intentional: a persisted config may still contain the old sip_bridge
+-- value, and that path is the source of the bursty RTP pacing seen on the
+-- device.  media_manager still falls back safely if the flashed firmware
+-- does not expose the carrier PCM APIs.
+local requested_media_backend="carrier_rtp"
 local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsip,audio_v2=audio_v2,voip=voip})
 local media_backend=media_manager.select(requested_media_backend,caps)
 if log then
