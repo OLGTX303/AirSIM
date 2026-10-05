@@ -1,4 +1,4 @@
-PROJECT="airsim-air8000"; VERSION="001.000.001"
+PROJECT="airsim-air8000"; VERSION="001.001.000"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
@@ -12,6 +12,8 @@ local gnss_module=require("gnss.gnss_service")
 local call_module=require("cellular.call")
 local sms_module=require("cellular.sms")
 local pcm_module=require("media.direct_pcm")
+local carrier_rtp_module=require("media.carrier_rtp")
+local media_manager=require("media.media_manager")
 local kv_api=nil
 if fskv then
     if fskv.init then pcall(fskv.init) end
@@ -21,9 +23,10 @@ if fskv then
     }
 end
 if kv_api then cfg=settings.load(kv_api,cfg) end
-local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2})
+local caps=capability.probe({cc=cc,sms=sms,gnss=libgnss or exgnss,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsipclient,audio_v2=audio_v2,voip=voip})
+local media_backend=media_manager.select(cfg.media_backend or "auto",caps)
 local device_identity=identity.read(mobile,mcu,cfg)
-local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION)
+local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp"
 if wlan and wlan.connect and cfg.wifi and type(cfg.wifi.ssid)=="string" and cfg.wifi.ssid ~= "" then
     local stored_bssid=cfg.wifi.bssid
     local bssid=type(stored_bssid)=="string" and stored_bssid:match("^[%da-fA-F]+$") and #stored_bssid==12 and string.fromHex(stored_bssid) or nil
@@ -35,29 +38,57 @@ if cfg.ble_pairing_code and cfg.ble_pairing_code ~= "REPLACE_WITH_6_DIGIT_PAIRIN
     if not ok and log then log.warn("airsim.ble",err) end
 end
 local pcm=pcm_module.new(cc,nil,nil)
+local carrier_rtp=carrier_rtp_module.new(cc,voip,socket)
 local media_frames=0
 local media_bytes=0
 local uplink_frames=0
 local uplink_bytes=0
 local downlink_pending=""
 
--- cc.hangUp(), cc.record() and external call audio depend on cc.init().
-if cc and cc.init then
-    local init_ok,init_result=pcall(cc.init,0)
-    if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result)) end
+local function init_cc_backend()
+    if media_backend=="carrier_rtp" then
+        local ok,err=carrier_rtp:init()
+        if ok then
+            if log then log.info("airsim.media","backend","carrier_rtp","real_early_media") end
+            return true
+        end
+        if log then log.warn("airsim.media","carrier_rtp_init_failed",tostring(err or "unknown")) end
+        -- A failed bridge-PCM init does not lock the CC backend. Fall back to
+        -- the legacy direct path only when its complete API is available.
+        if caps.direct_pcm then
+            media_backend="direct_pcm"
+            status.media_backend=media_backend
+            status.real_early_media=false
+        else
+            return false,err
+        end
+    end
+
+    if cc and cc.init then
+        local init_ok,init_result=pcall(cc.init,0)
+        if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),tostring(media_backend or "none")) end
+        return init_ok and init_result~=false
+    end
+    return false,"cc_init_unavailable"
 end
 
-local function stop_media()
-    if pcm.active then pcm:stop() end
+init_cc_backend()
+
+local function stop_media(finalize_cc)
+    if media_backend=="carrier_rtp" then
+        carrier_rtp:stop(finalize_cc==true)
+    else
+        if pcm.active then pcm:stop() end
+    end
     downlink_pending=""
     uplink_frames=0
     uplink_bytes=0
 end
 
 local function send_downlink(payload)
+    if media_backend~="direct_pcm" then return end
     if type(payload)~="string" or #payload==0 or not _G.relay_transport then return end
     downlink_pending=downlink_pending..payload
-    -- 40 ms packets: 640 bytes at 8 kHz, 1280 bytes at 16 kHz, S16LE mono.
     local frame_bytes=pcm.sample_rate==16000 and 1280 or 640
     while #downlink_pending>=frame_bytes do
         local frame=downlink_pending:sub(1,frame_bytes)
@@ -70,8 +101,6 @@ local function send_downlink(payload)
                 log.info("airsim.media","downlink",media_frames,media_bytes)
             end
         else
-            -- Put the frame back once. Keeping a bounded short tail is better
-            -- than silently consuming the remote party voice.
             downlink_pending=frame..downlink_pending
             local max_tail=(pcm.sample_rate==16000 and 6400 or 3200)
             if #downlink_pending>max_tail then
@@ -83,26 +112,34 @@ local function send_downlink(payload)
     end
 end
 
+local function current_media_stats()
+    if media_backend=="carrier_rtp" then return carrier_rtp:stats() end
+    return pcm:stats()
+end
+
 local function announce_media(kind)
     if not _G.relay_client then return end
-    local stats=pcm:stats()
+    local stats=current_media_stats()
     _G.relay_client:send(kind,{
-        call_id=pcm.call_id,
-        sample_rate=stats.sample_rate,
-        downlink_sample_rate=stats.sample_rate,
-        uplink_sample_rate=stats.uplink_sample_rate,
+        call_id=stats.call_id,
+        backend=media_backend,
+        transport=media_backend=="carrier_rtp" and "rtp_pcmu" or "websocket_pcm",
+        real_early_media=media_backend=="carrier_rtp",
+        sample_rate=stats.sample_rate or stats.downlink_sample_rate or 8000,
+        downlink_sample_rate=stats.downlink_sample_rate or stats.sample_rate or 8000,
+        uplink_sample_rate=stats.uplink_sample_rate or stats.sample_rate or 8000,
         channels=1,
         bits=16,
+        codec=stats.codec,
         format="pcm_s16le",
-        frame_duration_ms=40,
+        frame_duration_ms=media_backend=="carrier_rtp" and 20 or 40,
         stats=stats,
     },os.time()*1000)
 end
 
-local function start_media(call)
+local function start_direct_media(call)
     if pcm.active then return true end
     if not _G.relay_transport or not _G.relay_transport.send_binary then
-        if log then log.warn("airsim.media","start_failed","transport_unavailable") end
         return false,"media_transport_unavailable"
     end
     media_frames=0
@@ -113,14 +150,25 @@ local function start_media(call)
     local ok,err=pcm:start(call.call_id,function(is_dl,payload)
         if is_dl then send_downlink(payload) end
     end)
-    if log then log.info("airsim.media","start",tostring(ok),tostring(err or ""),tostring(pcm.sample_rate)) end
+    if log then log.info("airsim.media","start_direct",tostring(ok),tostring(err or ""),tostring(pcm.sample_rate)) end
+    if ok then announce_media("media.open") end
+    return ok,err
+end
+
+local function start_carrier_media(call)
+    local ok,err=carrier_rtp:start(call.call_id)
+    if log then log.info("airsim.media","start_carrier_rtp",tostring(ok),tostring(err or "")) end
     if ok then announce_media("media.open") end
     return ok,err
 end
 
 local function start_uplink_source(call)
+    if media_backend=="carrier_rtp" then
+        if not carrier_rtp.active then return start_carrier_media(call) end
+        return true
+    end
     if not pcm.active then
-        local ok,err=start_media(call)
+        local ok,err=start_direct_media(call)
         if not ok then return false,err end
     end
     local ok,err=pcm:start_uplink_source()
@@ -134,14 +182,28 @@ end
 
 local function emit_event(kind,payload)
     if kind=="call.state" and payload and payload.call then
-        if payload.event=="connected" then
-            start_media(payload.call)
-        elseif payload.event=="ended" or payload.event=="failed" or payload.event=="hangup" or
-               payload.event=="reject" or payload.event=="remote_hangup" then
-            stop_media()
+        if media_backend=="carrier_rtp" then
+            -- Start the native CC<->VoIP RTP bridge before cc.dial()/cc.accept()
+            -- so carrier early media is not missed. No synthetic ringback is used.
+            if payload.event=="dial" or payload.event=="answer" then
+                start_carrier_media(payload.call)
+            elseif payload.event=="ended" or payload.event=="failed" or payload.event=="hangup" or
+                   payload.event=="reject" or payload.event=="remote_hangup" then
+                stop_media(true)
+            end
+        else
+            if payload.event=="connected" then
+                start_direct_media(payload.call)
+            elseif payload.event=="ended" or payload.event=="failed" or payload.event=="hangup" or
+                   payload.event=="reject" or payload.event=="remote_hangup" then
+                stop_media(true)
+            end
         end
     elseif kind=="call.audio_start" and payload and payload.call then
         start_uplink_source(payload.call)
+    elseif kind=="call.media" and media_backend=="carrier_rtp" then
+        carrier_rtp:on_cc(payload.event=="play_stop" and "PLAY_STOP" or "PLAY",payload.value,payload.session)
+        announce_media(payload.event=="play" and "media.early" or "media.phase")
     end
     if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end
 end
@@ -175,7 +237,7 @@ local function save_wifi_config(ssid, password, bssid, security)
 end
 local function handle_relay_message(raw,fin,opcode)
     if tonumber(opcode)==2 then
-        if pcm.active then
+        if media_backend=="direct_pcm" and pcm.active then
             local ok,err=pcm:push_uplink(raw)
             if ok then
                 uplink_frames=uplink_frames+1
@@ -193,6 +255,14 @@ local function handle_relay_message(raw,fin,opcode)
     if type(msg) ~= "table" or type(msg.type) ~= "string" then return end
     local p=msg.payload or {}; local id=msg.message_id
     if msg.type == "device.register.ack" then return end
+    if msg.type == "media.rtp_config" then
+        if media_backend~="carrier_rtp" then return end
+        local ok,err=carrier_rtp:configure(p)
+        if _G.relay_client then
+            _G.relay_client:send("media.rtp_config.ack",{ok=ok,error=err,backend=media_backend},os.time()*1000)
+        end
+        return
+    end
     if msg.type == "command.dial" then dispatch_call_command(id,function() return _G.call_service:dial(id,p.number) end); return end
     if msg.type == "command.answer" then dispatch_call_command(id,function() return _G.call_service:answer() end); return end
     if msg.type == "command.reject" then dispatch_call_command(id,function() return _G.call_service:reject() end); return end
@@ -265,7 +335,7 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
             end
             if log then log.info("airsim.relay", "network_ready") end
             local transport
-            transport=ws_transport.new(websocket,handle_relay_message,function() backoff:reset(); _G.relay_transport=transport; _G.relay_client=relay_module.new(cfg,transport); _G.relay_client:register(status) end,function(reason) stop_media(); _G.relay_transport=nil; _G.relay_client=nil; if log then log.warn("airsim.relay", "disconnected", tostring(reason or "unknown")) end end)
+            transport=ws_transport.new(websocket,handle_relay_message,function() backoff:reset(); _G.relay_transport=transport; _G.relay_client=relay_module.new(cfg,transport); status.media_backend=media_backend; status.real_early_media=media_backend=="carrier_rtp"; _G.relay_client:register(status) end,function(reason) stop_media(false); _G.relay_transport=nil; _G.relay_client=nil; if log then log.warn("airsim.relay", "disconnected", tostring(reason or "unknown")) end end)
             local ok=transport:connect(cfg.relay_url)
             if not ok and log then log.warn("airsim.relay", "connect_failed", tostring(cfg.relay_url)) end
             if ok then
@@ -280,10 +350,10 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
                     while transport.connected do sys.wait(1000) end
                 end
             end
-            transport:close(); stop_media(); _G.relay_transport=nil; _G.relay_client=nil; sys.wait(backoff:next())
+            transport:close(); stop_media(false); _G.relay_transport=nil; _G.relay_client=nil; sys.wait(backoff:next())
         end
     end)
 end
 if log then log.info("airsim","Air8000A backend starting",PROJECT,VERSION) end
-if sys and sys.subscribe then sys.subscribe("CC_IND",function(s) if _G.call_service then _G.call_service:on_cc(s) end end); sys.subscribe("SMS_INC",function(sender,body,ts) if _G.sms_service then _G.sms_service:on_receive(sender,body,ts) end end) end
+if sys and sys.subscribe then sys.subscribe("CC_IND",function(s,value,session) if media_backend=="carrier_rtp" then carrier_rtp:on_cc(s,value,session) end; if _G.call_service then _G.call_service:on_cc(s,value,session) end end); sys.subscribe("SMS_INC",function(sender,body,ts) if _G.sms_service then _G.sms_service:on_receive(sender,body,ts) end end) end
 if sys and sys.run then sys.run() end
