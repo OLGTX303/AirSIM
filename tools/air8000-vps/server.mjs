@@ -224,11 +224,20 @@ async function ensureRtpSession(deviceID) {
     const now=Date.now();
     session.remote={address:rinfo.address,port:rinfo.port};
     session.lastRx=now;
+    const streamStart=session.rxExpected===null;
 
     const stats=getMediaStats(deviceID);
     stats.rtp_rx_packets++;
     stats.last_activity=now;
-    if(stats.rtp_rx_packets===1)console.log(`RTP received device=${deviceID} bytes=${parsed.payload.length} from=${rinfo.address}:${rinfo.port}`);
+    if(streamStart){
+      // The media ticket can exist long before the modem sends its first RTP
+      // packet. Align the playout clock here; otherwise mediaFramesDue() tries
+      // to catch up the stale ticket clock in bursts.
+      session.clockStart=performance.now();
+      session.rxClock=0;
+      session.txClock=0;
+      console.log(`RTP received device=${deviceID} bytes=${parsed.payload.length} from=${rinfo.address}:${rinfo.port}`);
+    }
 
     if(session.lastArrivalMs && session.lastRtpTimestamp!==null){
       const arrivalDelta=now-session.lastArrivalMs;
@@ -334,6 +343,9 @@ function resetCarrierUplink(session) {
 }
 function resetRtpSession(session) {
   session.generation++;
+  session.clockStart=performance.now();
+  session.rxClock=0;
+  session.txClock=0;
   session.remote=null;
   session.tx=randomRtpState(crypto.randomBytes);
   session.txStarted=false;

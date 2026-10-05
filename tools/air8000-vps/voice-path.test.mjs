@@ -40,6 +40,8 @@ assert.match(server,/rtp_latency_trim_frames/);
 assert.match(server,/session\.rxGapOpen \|\| now-session\.rxMissingSince>=session\.rxMissingGraceMs/);
 assert.match(server,/parsed\.ssrc!==session\.rxSsrc/);
 assert.match(server,/rtp_stream_resets/);
+assert.match(server,/session\.clockStart=performance\.now\(\);/);
+assert.match(server,/session\.rxClock=0;/);
 assert.match(server,/txPrimeFrames:3/);
 assert.match(server,/uplink_underrun_frames/);
 assert.match(server,/const keep=PCMU_FRAME_BYTES\*4/);
