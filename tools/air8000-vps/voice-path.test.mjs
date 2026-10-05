@@ -10,8 +10,8 @@ assert.match(server,/rtp_jitter_ms/);
 assert.match(server,/audio_concealment_frames/);
 assert.doesNotMatch(server,/while\(session\.pendingUplink\.length>=320\)/);
 
-assert.match(page,/targetLead:0\\.08/);
-assert.match(page,/minLead:0\\.04/);
+assert.match(page,/targetLead:0\.08/);
+assert.match(page,/minLead:0\.04/);
 assert.match(page,/voice\.playUnderruns\+\+/);
 assert.match(page,/createScriptProcessor\(1024,1,1\)/);
 assert.match(page,/registerProcessor\('airsim-playback'/);
