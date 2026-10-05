@@ -44,8 +44,8 @@ assert.match(server,/const keep=PCMU_FRAME_BYTES\*4/);
 assert.match(server,/releaseRtpMedia\(event\.device_id\)/);
 assert.match(server,/resetCarrierUplink\(session\)/);
 
-assert.match(page,/targetLead:0\.08/);
-assert.match(page,/minLead:0\.04/);
+assert.match(page,/targetLead:0\.20/);
+assert.match(page,/minLead:0\.08/);
 assert.match(page,/voice\.playUnderruns\+\+/);
 assert.match(page,/createScriptProcessor\(1024,1,1\)/);
 assert.match(page,/registerProcessor\('airsim-playback'/);
