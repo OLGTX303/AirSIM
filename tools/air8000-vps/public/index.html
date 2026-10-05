@@ -72,7 +72,7 @@ function createVoiceState(){
     ws:null,ctx:null,stream:null,source:null,processor:null,micHighPass:null,micLowPass:null,muteNode:null,
     playNode:null,playModuleUrl:null,useWorklet:false,nextPlay:0,downlinkRate:8000,uplinkRate:8000,
     pending:new Int16Array(0),downlinkPackets:0,playQueue:[],playStarted:false,playUnderruns:0,
-    playDrops:0,targetLead:0.08,minLead:0.04,maxLead:0.25,wantActive:false,deviceID:null,
+    playDrops:0,workletPending:new Float32Array(0),targetLead:0.08,minLead:0.04,maxLead:0.25,wantActive:false,deviceID:null,
     reconnectTask:null,reconnectToken:0,lastDownlinkAt:0,mediaConnectedAt:0,watchdog:null,
     socketGeneration:0,ticket:null
   };
@@ -85,7 +85,9 @@ async function refresh(){
     select.innerHTML=devices.map(d=>'<option value="'+esc(d.device_id)+'">'+esc(d.device_id)+' — '+(d.connected?'online':'offline')+'</option>').join('');
     if(!devices.length)select.innerHTML='<option value="">No device</option>';
     else if(wanted&&devices.some(d=>d.device_id===wanted))select.value=wanted;
-    render();
+    // Avoid rebuilding the phone panel every second during an active call.
+    // Media events update voice status directly; render again when audio stops.
+    if(!voice.wantActive)render();
   }catch(e){
     if(!voice.wantActive)write(e.message);
   }
@@ -125,7 +127,7 @@ async function setupPlaybackWorklet(){
     "class AirSIMPlaybackProcessor extends AudioWorkletProcessor {",
     " constructor(){super();this.q=[];this.offset=0;this.buffered=0;this.started=false;this.target=Math.round(sampleRate*0.08);this.max=Math.round(sampleRate*0.40);this.underruns=0;this.dropped=0;this.port.onmessage=e=>this.msg(e.data||{});}",
     " msg(m){if(m.type==='reset'){this.q=[];this.offset=0;this.buffered=0;this.started=false;return;}if(m.type!=='pcm'||!m.samples)return;const a=new Float32Array(m.samples);while(this.buffered+a.length>this.max&&this.q.length){const first=this.q.shift();this.buffered-=Math.max(0,first.length-this.offset);this.offset=0;this.dropped++;}this.q.push(a);this.buffered+=a.length;if(!this.started&&this.buffered>=this.target)this.started=true;if((this.dropped&15)===1)this.port.postMessage({type:'drop',count:this.dropped});}",
-    " process(inputs,outputs){const out=outputs[0]&&outputs[0][0];if(!out)return true;out.fill(0);if(!this.started)return true;let i=0;while(i<out.length){if(!this.q.length){this.started=false;this.underruns++;this.port.postMessage({type:'underrun',count:this.underruns});break;}const a=this.q[0];const n=Math.min(out.length-i,a.length-this.offset);out.set(a.subarray(this.offset,this.offset+n),i);i+=n;this.offset+=n;this.buffered-=n;if(this.offset>=a.length){this.q.shift();this.offset=0;}}return true;}",
+    " process(inputs,outputs){const out=outputs[0]&&outputs[0][0];if(!out)return true;out.fill(0);if(!this.started)return true;let i=0;while(i<out.length){if(!this.q.length){this.underruns++;this.port.postMessage({type:'underrun',count:this.underruns});break;}const a=this.q[0];const n=Math.min(out.length-i,a.length-this.offset);out.set(a.subarray(this.offset,this.offset+n),i);i+=n;this.offset+=n;this.buffered-=n;if(this.offset>=a.length){this.q.shift();this.offset=0;}}return true;}",
     "}",
     "registerProcessor('airsim-playback',AirSIMPlaybackProcessor);"
   ].join("\n");
@@ -149,6 +151,7 @@ async function setupPlaybackWorklet(){
 }
 function resetPlaybackQueue(){
   voice.playQueue=[];
+  voice.workletPending=new Float32Array(0);
   voice.playStarted=false;
   voice.nextPlay=0;
   if(voice.playNode)voice.playNode.port.postMessage({type:'reset'});
@@ -172,7 +175,17 @@ async function playPcm(buffer){
   if(voice.ctx.state!=='running')await voice.ctx.resume();
   if(voice.useWorklet&&voice.playNode){
     const samples=pcm16ToContext(buffer,voice.downlinkRate,voice.ctx.sampleRate);
-    voice.playNode.port.postMessage({type:'pcm',samples:samples.buffer},[samples.buffer]);
+    const pending=voice.workletPending||new Float32Array(0);
+    const merged=new Float32Array(pending.length+samples.length);
+    merged.set(pending);merged.set(samples,pending.length);
+    const batch=Math.max(samples.length,Math.round(voice.ctx.sampleRate*0.04));
+    let offset=0;
+    while(merged.length-offset>=batch){
+      const chunk=merged.slice(offset,offset+batch);
+      voice.playNode.port.postMessage({type:'pcm',samples:chunk.buffer},[chunk.buffer]);
+      offset+=batch;
+    }
+    voice.workletPending=merged.slice(offset);
     return;
   }
   // Compatibility fallback for browsers without AudioWorklet.
@@ -233,9 +246,16 @@ async function openMediaSocket(deviceID,reconnecting=false){
     }
   };
   ws.onerror=()=>{};
-  ws.onclose=()=>{
+  ws.onclose=event=>{
     if(voice.ws!==ws)return;
     voice.ws=null;
+    if(event.code===4001){
+      voice.wantActive=false;
+      voice.reconnectToken++;
+      voiceStatus('Carrier call ended');
+      stopVoice().catch(()=>{});
+      return;
+    }
     if(voice.wantActive)scheduleMediaReconnect('media socket disconnected');
   };
   return ticket;
@@ -268,8 +288,14 @@ function startVoiceWatchdog(){
     const ws=voice.ws;
     if(!ws||ws.readyState!==WebSocket.OPEN)return;
     if(activeCallState==='IDLE'||activeCallState==='ENDED')return;
-    const reference=voice.lastDownlinkAt||voice.mediaConnectedAt;
-    if(reference&&Date.now()-reference>5000){
+    // Do not reconnect merely because an unanswered call has no media yet.
+    // Recovery is valid only after media was received and then stopped.
+    const reference=voice.lastDownlinkAt;
+    // A quiet carrier stream is not proof that the WebSocket is broken.
+    // Only recover after a real stream has delivered enough media and then
+    // stayed silent for a long interval; socket close still handles network
+    // failures immediately.
+    if(voice.downlinkPackets>=50&&reference&&Date.now()-reference>30000){
       voiceStatus('Media stalled — recovering automatically…');
       try{ws.close(4001,'media-stalled')}catch{}
     }
@@ -332,6 +358,7 @@ async function stopVoice(){
   if(old.playModuleUrl)URL.revokeObjectURL(old.playModuleUrl);
   voice=createVoiceState();
   voiceStatus('Voice bridge stopped');
+  setTimeout(refresh,0);
 }
 function simplifyBleForm(){const pairing=document.querySelector('#ble-pairing');if(pairing)pairing.closest('.field')?.style.setProperty('display','none');const bssid=document.querySelector('#wifi-bssid');if(bssid)bssid.closest('.field')?.style.setProperty('display','none');const security=document.querySelector('#wifi-security');if(security)security.closest('.field')?.style.setProperty('display','none');const scan=[...document.querySelectorAll('button')].find(b=>/scan wi/i.test(b.textContent));if(scan)scan.style.display='none';const send=[...document.querySelectorAll('button')].find(b=>/send.*ble/i.test(b.textContent));if(send)send.style.display='none';const ssid=document.querySelector('#wifi-ssid');if(!ssid)return;let picker=document.querySelector('#ble-ssid');if(!picker){picker=document.createElement('select');picker.id='ble-ssid';picker.style.minWidth='240px';picker.innerHTML='<option value="">Connect over BLE to scan networks</option>';picker.onchange=()=>{ssid.value=picker.value;const network=bleNetworks.find(n=>n.ssid===picker.value);if(bssid)bssid.value=network?.bssid||'';if(security)security.value=network?.security||'auto'};ssid.style.display='none';ssid.parentElement?.insertBefore(picker,ssid)}if(!document.querySelector('#ble-submit')){const submit=document.createElement('button');submit.id='ble-submit';submit.textContent='Connect Air8000 to selected Wi-Fi';submit.onclick=bleConnectWifi;const host=document.querySelector('#wifi-password')?.closest('.field')?.parentElement||document.querySelector('#wifi');host?.appendChild(submit)}}
 function ensureBlePicker(){let picker=document.querySelector('#ble-ssid');if(picker)return picker;const ssid=document.querySelector('#wifi-ssid');if(!ssid)return null;picker=document.createElement('select');picker.id='ble-ssid';picker.style.minWidth='240px';picker.setAttribute('aria-label','Scanned Wi-Fi networks');picker.onchange=()=>{ssid.value=picker.value;const network=bleNetworks.find(n=>n.ssid===picker.value);const bssid=document.querySelector('#wifi-bssid');const security=document.querySelector('#wifi-security');if(bssid)bssid.value=network?.bssid||'';if(security)security.value=network?.security||'auto'};ssid.style.display='none';ssid.parentElement?.insertBefore(picker,ssid);return picker}
@@ -361,5 +388,7 @@ render=function(){
     if(bleNetworks.length)populateBleNetworks();
   }
 };
+const renderWithPeakAnalysis=render;
+render=function(){renderWithPeakAnalysis();const d=current();const m=d?.media_stats||{};const host=document.querySelector('#calls');if(!host)return;let card=document.querySelector('#peak-analysis');if(!card){card=document.createElement('div');card.className='status';card.id='peak-analysis';host.appendChild(card)}card.innerHTML=`Peak analysis (not recorded)<br>DL peak ${esc(m.downlink_peak||0)} · RMS ${esc(m.downlink_rms||0)} · silent ${esc(m.downlink_silent_frames||0)} · clipped ${esc(m.downlink_clipped_frames||0)}<br>UL peak ${esc(m.uplink_peak||0)} · RMS ${esc(m.uplink_rms||0)} · silent ${esc(m.uplink_silent_frames||0)} · clipped ${esc(m.uplink_clipped_frames||0)}`};
 refresh();setInterval(refresh,1000);
 </script>

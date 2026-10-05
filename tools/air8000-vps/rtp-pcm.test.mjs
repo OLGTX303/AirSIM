@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import {
-  mulawDecodeByte, mulawEncodeSample, encodePcmuFrame, decodePcmuPayload,
+  mulawDecodeByte, mulawEncodeSample, encodePcmuFrame, decodePcmuPayload, resamplePcm16,
   buildRtpPacket, parseRtpPacket, randomRtpState,
 } from "./rtp-pcm.mjs";
 
@@ -16,6 +16,9 @@ const encoded=encodePcmuFrame(pcm);
 assert.equal(encoded.length,160);
 const decoded=decodePcmuPayload(encoded);
 assert.equal(decoded.length,320);
+const wide=resamplePcm16(decoded,8000,16000);
+assert.equal(wide.length,640);
+assert.equal(resamplePcm16(wide,16000,8000).length,320);
 
 const state=randomRtpState(crypto.randomBytes);
 const seq=state.sequence,ts=state.timestamp,ssrc=state.ssrc;

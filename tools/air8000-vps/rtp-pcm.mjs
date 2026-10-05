@@ -40,6 +40,28 @@ export function encodePcmuFrame(pcm) {
   return out;
 }
 
+// Convert signed 16-bit little-endian mono PCM between the browser rate and
+// the fixed 8 kHz SIP/PCMU rate.
+export function resamplePcm16(pcm, fromRate, toRate) {
+  if (!Buffer.isBuffer(pcm)) pcm = Buffer.from(pcm);
+  if ((pcm.length & 1) !== 0) throw new Error("PCM S16LE frame must have an even byte length");
+  fromRate = Number(fromRate); toRate = Number(toRate);
+  if (!(fromRate > 0) || !(toRate > 0)) throw new Error("PCM sample rates must be positive");
+  if (fromRate === toRate) return Buffer.from(pcm);
+  const inputSamples = pcm.length / 2;
+  const outputSamples = Math.max(1, Math.round(inputSamples * toRate / fromRate));
+  const out = Buffer.allocUnsafe(outputSamples * 2);
+  for (let i = 0; i < outputSamples; i++) {
+    const position = i * fromRate / toRate;
+    const left = Math.min(inputSamples - 1, Math.floor(position));
+    const right = Math.min(inputSamples - 1, left + 1);
+    const fraction = position - left;
+    const sample = pcm.readInt16LE(left * 2) * (1 - fraction) + pcm.readInt16LE(right * 2) * fraction;
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sample))), i * 2);
+  }
+  return out;
+}
+
 export function parseRtpPacket(packet) {
   if (!Buffer.isBuffer(packet)) packet = Buffer.from(packet);
   if (packet.length < RTP_HEADER_BYTES) return null;

@@ -189,8 +189,11 @@ Wi-Fi credentials or enrollment tokens.
 Firmware that reports the Air8000 CC pure-PCM bridge uses a direct UDP RTP
 media leg in addition to the device WSS control channel. The gateway allocates
 one UDP port per Air8000 from the default range `41000-41063`, sends that
-endpoint to the module as `media.rtp_config`, decodes incoming PCMU RTP to
-S16LE PCM for the browser, and encodes browser microphone PCM back to PCMU RTP.
+endpoint to the module as `media.rtp_config`, decodes incoming PCMU RTP at its
+native 8 kHz rate, resamples it to 16 kHz S16LE PCM for the browser, and
+resamples browser microphone PCM back to 8 kHz before encoding PCMU RTP. The
+SIP/RTP leg remains PCMU/8000 for compatibility; the browser media leg is
+PCM16/16000.
 
 Set the public/LAN IPv4 that the Air8000 can reach:
 

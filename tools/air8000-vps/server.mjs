@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import dgram from "node:dgram";
 import { WebSocketServer } from "ws";
-import { buildRtpPacket, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState } from "./rtp-pcm.mjs";
+import { buildRtpPacket, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState, resamplePcm16 } from "./rtp-pcm.mjs";
 import { SipUdpServer } from "./sip-udp.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
@@ -46,9 +46,23 @@ function emptyMediaStats() {
     uplink_frames:0,uplink_bytes:0,downlink_frames:0,downlink_bytes:0,
     dropped_downlink_frames:0,rtp_rx_packets:0,rtp_tx_packets:0,rtp_tx_errors:0,
     rtp_lost_packets:0,rtp_late_packets:0,rtp_duplicate_packets:0,
-    rtp_reordered_packets:0,rtp_jitter_ms:0,audio_concealment_frames:0,
-    uplink_dropped_frames:0,last_activity:Date.now()
+    rtp_reordered_packets:0,rtp_jitter_ms:0,audio_concealment_frames:0,rtp_idle_frames:0,
+    uplink_dropped_frames:0,last_activity:Date.now(),
+    downlink_peak:0,downlink_rms:0,downlink_silent_frames:0,downlink_clipped_frames:0,
+    uplink_peak:0,uplink_rms:0,uplink_silent_frames:0,uplink_clipped_frames:0
   };
+}
+function updatePcmMetrics(stats,prefix,pcm){
+  let peak=0,sum=0,clipped=0;
+  for(let i=0;i+1<pcm.length;i+=2){
+    const sample=pcm.readInt16LE(i); const abs=Math.abs(sample);
+    if(abs>peak)peak=abs; if(abs>=32760)clipped++; sum+=sample*sample;
+  }
+  const samples=pcm.length>>1; if(!samples)return;
+  stats[`${prefix}_peak`]=Math.max(stats[`${prefix}_peak`],peak);
+  stats[`${prefix}_rms`]=Math.round(Math.sqrt(sum/samples));
+  if(peak<256)stats[`${prefix}_silent_frames`]++;
+  if(clipped)stats[`${prefix}_clipped_frames`]++;
 }
 function rtpSeqDelta(a,b) {
   let d=((a&0xffff)-(b&0xffff))&0xffff;
@@ -155,7 +169,13 @@ async function ensureRtpSession(deviceID) {
     rxQueue:new Map(),
     rxExpected:null,
     rxStarted:false,
-    rxWarmupFrames:6,
+    // The Air8000 SIP bridge can deliver several RTP packets in a burst.
+    // Keep enough media queued to absorb that burst before clocking the
+    // browser at one 20 ms frame per tick.
+    rxWarmupFrames:10,
+    rxHoldMs:360,
+    rxMissingGraceMs:60,
+    rxMissingSince:0,
     lastArrivalMs:0,
     lastRtpTimestamp:null,
     jitterMs:0,
@@ -242,6 +262,14 @@ const sipServer = new SipUdpServer({
     if (event.type === "dial" || event.type === "resume" || event.type === "progress" || event.type === "connected" || event.type === "ended" || event.type === "failed") {
       console.log(`SIP call ${event.type} device=${event.device_id}`);
     }
+    if (event.type === "failed" || event.type === "ended") {
+      // Native carrier failure/remote release is authoritative. Ensure the
+      // browser and SIP dialog are released even if the device-side SIP
+      // teardown notification is delayed or absent.
+      sipServer.hangup(event.device_id);
+      const peer=mediaPeers.get(event.device_id);
+      if(peer?.readyState===1)peer.close(4001,"carrier call ended");
+    }
   },
 });
 
@@ -255,6 +283,7 @@ function resetRtpSession(session) {
   session.rxQueue.clear();
   session.rxExpected=null;
   session.rxStarted=false;
+  session.rxMissingSince=0;
   session.lastArrivalMs=0;
   session.lastRtpTimestamp=null;
   session.jitterMs=0;
@@ -262,31 +291,55 @@ function resetRtpSession(session) {
 function playoutCarrierDownlink(session) {
   if(!session)return;
   const stats=getMediaStats(session.device_id);
+  const now=Date.now();
   if(!session.rxStarted){
     if(session.rxQueue.size<session.rxWarmupFrames)return;
     session.rxStarted=true;
   }
   if(session.rxExpected===null)return;
 
-  if(Date.now()-session.lastRx>500 && session.rxQueue.size===0){
+  if(now-session.lastRx>500 && session.rxQueue.size===0){
     session.rxStarted=false;
     session.rxExpected=null;
+    session.rxMissingSince=0;
     return;
   }
 
   const payload=session.rxQueue.get(session.rxExpected);
   let pcm;
+  let advanceSequence=true;
   if(payload){
     session.rxQueue.delete(session.rxExpected);
-    pcm=decodePcmuPayload(payload);
+    session.rxMissingSince=0;
+    pcm=resamplePcm16(decodePcmuPayload(payload),8000,16000);
     stats.downlink_frames++;
     stats.downlink_bytes+=pcm.length;
+    updatePcmMetrics(stats,"downlink",pcm);
   }else{
-    pcm=Buffer.alloc(320);
-    stats.rtp_lost_packets++;
-    stats.audio_concealment_frames++;
+    // No later packet means no sequence gap has been proven. This is an idle
+    // carrier period, not packet loss; keep the browser clocked but retain
+    // rxExpected so the next RTP packet is not misclassified as late.
+    if(session.rxQueue.size===0){
+      pcm=Buffer.alloc(640);
+      stats.rtp_idle_frames++;
+      advanceSequence=false;
+    } else {
+    // Do not repeat carrier audio: give a late packet a short chance to arrive
+    // before declaring loss.
+    // The 20 ms playout clock continues with silence, so this cannot create
+    // a burst; it only prevents premature sequence advancement on jitter.
+    if(!session.rxMissingSince)session.rxMissingSince=now;
+    pcm=Buffer.alloc(640);
+    if(now-session.rxMissingSince>=session.rxMissingGraceMs){
+      stats.rtp_lost_packets++;
+      stats.audio_concealment_frames++;
+      session.rxMissingSince=0;
+    } else {
+      advanceSequence=false;
+    }
+    }
   }
-  session.rxExpected=(session.rxExpected+1)&0xffff;
+  if(advanceSequence)session.rxExpected=(session.rxExpected+1)&0xffff;
   stats.last_activity=Date.now();
 
   // Keep the browser clocked at exactly one 20 ms frame per tick. The
@@ -310,12 +363,13 @@ function flushCarrierUplink(session) {
   stats.rtp_tx_packets++;
   stats.uplink_frames++;
   stats.uplink_bytes+=pcm.length;
+  updatePcmMetrics(stats,"uplink",pcm);
   stats.last_activity=Date.now();
 }
 function sendPcmToCarrier(deviceID,raw) {
   const session=rtpSessions.get(deviceID);
   if(!session)return false;
-  const data=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
+  const data=resamplePcm16(Buffer.isBuffer(raw)?raw:Buffer.from(raw),16000,8000);
   if(data.length===0)return true;
   session.pendingUplink=Buffer.concat([session.pendingUplink,data]);
   const max=320*12; // 240 ms hard ceiling; normal target stays below 80 ms.
@@ -403,9 +457,12 @@ const server=http.createServer(async (req,res)=>{
       const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0];
       return json(res,201,{
         expires_in:60,
-        sample_rate:d.media_rate||8000,
-        downlink_sample_rate:d.media_rate||8000,
-        uplink_sample_rate:rtpMediaEnabled(d)?8000:(d.media_uplink_rate||16000),
+        sample_rate:rtpMediaEnabled(d)?16000:(d.media_rate||8000),
+        downlink_sample_rate:rtpMediaEnabled(d)?16000:(d.media_rate||8000),
+        // SIP/RTP remains PCMU/8000. The browser leg is PCM16/16000;
+        // server-side resampling keeps both media contracts explicit.
+        uplink_sample_rate:rtpMediaEnabled(d)?16000:(d.media_uplink_rate||16000),
+        browser_sample_rate:rtpMediaEnabled(d)?16000:(d.media_rate||16000),
         transport:rtpMediaEnabled(d)?(carrierRtpEnabled(d)?"carrier_rtp":"sip_rtp"):"websocket_pcm",
         real_early_media:carrierRtpEnabled(d) || sipBridgeEnabled(d),
         ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`
@@ -585,6 +642,14 @@ mediaWss.on("connection",(ws,deviceID)=>{
         const call=msg.payload?.call;
         const ended=["ended","failed","hangup","reject","remote_hangup","disconnected"].includes(event);
         device.status={...(device.status||{}),active_call:ended?null:(call||device.status?.active_call||null)};
+        if(ended){
+          // Device-side carrier release is authoritative even when the SIP
+          // peer has not sent BYE yet. Preserve the event, then tear down the
+          // browser/SIP media session immediately.
+          sipServer.hangup(device.device_id);
+          const peer=mediaPeers.get(device.device_id);
+          if(peer?.readyState===1)peer.close(4001,"carrier call ended");
+        }
       }
       if (msg.type === "media.voice_quality") {
         const rate=Number(msg.payload?.cellular_sample_rate)||0;

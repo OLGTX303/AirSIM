@@ -28,5 +28,6 @@ const sipSource = await import("node:fs").then(fs => fs.readFileSync(new URL("./
 assert.match(sipSource,/async resume\(device, session\)/);
 assert.match(sipSource,/X-AirSIM-Resume/);
 assert.match(sipSource,/this\.forget\(device\.device_id\)/);
+assert.match(sipSource,/this\.deviceCalls\.get\(deviceId\) === call\) this\.deviceCalls\.delete\(deviceId\)/);
 
 console.log("Air8000 SIP UDP tests passed");

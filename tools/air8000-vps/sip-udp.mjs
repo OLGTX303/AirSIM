@@ -189,6 +189,10 @@ export class SipUdpServer {
         ["CSeq", `${call.cseq - 1} CANCEL`], ["Content-Length", "0"],
       ], "");
     }
+    // Release the per-device dial lock immediately. The SIP 200 response can
+    // arrive later; keeping the dialog in `calls` still lets #message finish
+    // that transaction, while a new call is no longer blocked by stale state.
+    if (this.deviceCalls.get(deviceId) === call) this.deviceCalls.delete(deviceId);
     return true;
   }
 
