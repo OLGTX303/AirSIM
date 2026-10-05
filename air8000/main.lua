@@ -1,4 +1,4 @@
-PROJECT="airsim-air8000"; VERSION="001.001.000"
+PROJECT="airsim-air8000"; VERSION="001.001.001"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
