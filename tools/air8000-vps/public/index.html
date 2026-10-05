@@ -28,7 +28,7 @@ const bootstrap=new URLSearchParams(location.hash.replace(/^#/,'')).get('token')
 if(bootstrap){localStorage.airsimLanToken=bootstrap;history.replaceState(null,'',location.pathname+location.search)}
 if(!window.isSecureContext){const warning=document.querySelector('#secure-warning');if(warning)warning.style.display='block'}
 let devices=[]; const select=document.querySelector('#device');
-let voice={ws:null,ctx:null,stream:null,source:null,processor:null,nextPlay:0,downlinkRate:8000,uplinkRate:16000,pending:new Int16Array(0),downlinkPackets:0,playQueue:[],playStarted:false,playChain:Promise.resolve(),playUnderruns:0,targetLead:0.14,minLead:0.06,maxLead:0.30};let voiceStatusText='Voice bridge stopped';
+let voice=createVoiceState();let voiceStatusText='Voice bridge stopped';
 function auth(){return {Authorization:'Bearer '+(localStorage.airsimLanToken||''),'Content-Type':'application/json'}}
 async function api(path,opt={}){opt.headers={...auth(),...(opt.headers||{})};const r=await fetch(path,opt);const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
 function write(x){document.querySelector('#log').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}
@@ -38,7 +38,7 @@ function events(type){return (current()?.events||[]).filter(e=>!type||e.type===t
 function eventRows(type){const rows=events(type);return rows.length?rows.map(e=>`<div class="status"><b>${esc(e.payload?.event||e.type)}</b> — ${esc(JSON.stringify(e.payload||{}))}</div>`).join(''):'<p class="muted">No live events received from the device.</p>'}
 async function command(type,payload={}){const d=current();if(!d)return write('Select a connected Air8000 device first.');try{const result=await api('/api/devices/'+encodeURIComponent(d.device_id)+'/command',{method:'POST',body:JSON.stringify({type,payload})});write(result);if(!['dtmf','hangup','answer','reject'].includes(type))setTimeout(refresh,400);return result}catch(e){write(e.message);throw e}}
 function incomingCall(){const latest=events('call.state')[0];return latest&&(latest.payload?.event==='incoming'||latest.payload?.call?.state==='INCOMING')?latest:null}
-async function callAction(type,payload,button,label){if(button?.disabled)return;const old=button?.textContent||label;if(button){button.disabled=true;button.textContent=type==='hangup'?'Ended':'Sending…'}if(type==='hangup'||type==='reject'){activeCallState='ENDED';voiceStatus('Call ended');if(voice.ws)stopVoice().catch(()=>{})}try{await command(type,payload);if(button)button.textContent=type==='hangup'?'Ended':'Accepted';setTimeout(()=>{if(button){button.disabled=false;button.textContent=old}},700)}catch(e){if(button){button.disabled=false;button.textContent='Failed'}voiceStatus('Call command failed: '+e.message);setTimeout(()=>{if(button)button.textContent=old},1200)}}
+async function callAction(type,payload,button,label){if(button?.disabled)return;const old=button?.textContent||label;if(button){button.disabled=true;button.textContent=type==='hangup'?'Ended':'Sending…'}if(type==='hangup'||type==='reject'){activeCallState='ENDED';voiceStatus('Call ended');if(voice.wantActive||voice.ctx)stopVoice().catch(()=>{})}try{await command(type,payload);if(button)button.textContent=type==='hangup'?'Ended':'Accepted';setTimeout(()=>{if(button){button.disabled=false;button.textContent=old}},700)}catch(e){if(button){button.disabled=false;button.textContent='Failed'}voiceStatus('Call command failed: '+e.message);setTimeout(()=>{if(button)button.textContent=old},1200)}}
 function dialDigit(value){const el=document.querySelector('#call-number');if(!el)return;el.value=(el.value||'')+value;localStorage.setItem('airsimDialNumber',el.value)}
 function clearDial(){const el=document.querySelector('#call-number');if(el){el.value='';localStorage.removeItem('airsimDialNumber')}}
 function backspaceDial(){const el=document.querySelector('#call-number');if(el){el.value=(el.value||'').slice(0,-1);localStorage.setItem('airsimDialNumber',el.value)}}
@@ -67,45 +67,272 @@ async function bleConnect(){try{if(!window.isSecureContext||!navigator.bluetooth
 async function bleWrite(payload){if(!bleConfigChar)throw Error('Connect to an Air8000 over BLE first.');await bleConfigChar.writeValueWithResponse(bleEncoder.encode(JSON.stringify(payload)))}
 async function bleScan(){try{bleNetworks=[];const el=document.querySelector('#ble-networks');if(el)el.textContent='Scanning…';await bleWrite({pairing_code:document.querySelector('#ble-pairing').value,op:'scan'});bleStatus('BLE scan requested; waiting for networks…')}catch(e){bleStatus('BLE error: '+e.message)}}
 async function bleConnectWifi(){try{await bleWrite({pairing_code:document.querySelector('#ble-pairing').value,op:'connect',ssid:document.querySelector('#wifi-ssid').value,password:document.querySelector('#wifi-password').value,bssid:document.querySelector('#wifi-bssid').value,security:document.querySelector('#wifi-security').value});bleStatus('BLE Wi-Fi credentials sent; waiting for connection…')}catch(e){bleStatus('BLE error: '+e.message)}}
-async function refresh(){try{devices=await api('/api/devices');select.innerHTML=devices.map(d=>`<option value="${esc(d.device_id)}">${esc(d.device_id)} — ${d.connected?'online':'offline'}</option>`).join('');if(!devices.length)select.innerHTML='<option value="">No device</option>';render()}catch(e){write(e.message)}}
+function createVoiceState(){
+  return {
+    ws:null,ctx:null,stream:null,source:null,processor:null,micHighPass:null,micLowPass:null,muteNode:null,
+    playNode:null,playModuleUrl:null,useWorklet:false,nextPlay:0,downlinkRate:8000,uplinkRate:8000,
+    pending:new Int16Array(0),downlinkPackets:0,playQueue:[],playStarted:false,playUnderruns:0,
+    playDrops:0,targetLead:0.14,minLead:0.06,maxLead:0.30,wantActive:false,deviceID:null,
+    reconnectTask:null,reconnectToken:0,lastDownlinkAt:0,mediaConnectedAt:0,watchdog:null,
+    socketGeneration:0,ticket:null
+  };
+}
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function refresh(){
+  const wanted=voice.deviceID||select.value;
+  try{
+    devices=await api('/api/devices');
+    select.innerHTML=devices.map(d=>'<option value="'+esc(d.device_id)+'">'+esc(d.device_id)+' — '+(d.connected?'online':'offline')+'</option>').join('');
+    if(!devices.length)select.innerHTML='<option value="">No device</option>';
+    else if(wanted&&devices.some(d=>d.device_id===wanted))select.value=wanted;
+    render();
+  }catch(e){
+    if(!voice.wantActive)write(e.message);
+  }
+}
 function voiceStatus(text){voiceStatusText=text;const el=document.querySelector('#voice-status');if(el)el.textContent=text}
-function downsample(input,fromRate,toRate){const ratio=fromRate/toRate;const length=Math.max(1,Math.round(input.length/ratio));const out=new Int16Array(length);for(let i=0;i<length;i++){const start=Math.floor(i*ratio),end=Math.min(input.length,Math.floor((i+1)*ratio));let sum=0,count=0;for(let j=start;j<end;j++){sum+=input[j];count++}const sample=count?sum/count:0;out[i]=Math.max(-1,Math.min(1,sample))*0x7fff}return out.buffer}
-function sendMicPcm(buffer){if(!voice.ws||voice.ws.readyState!==WebSocket.OPEN)return;const incoming=new Int16Array(buffer);const pending=voice.pending||new Int16Array(0);const merged=new Int16Array(pending.length+incoming.length);merged.set(pending);merged.set(incoming,pending.length);const frameSamples=Math.max(160,Math.round(voice.uplinkRate*0.02));let offset=0;while(offset+frameSamples<=merged.length){voice.ws.send(merged.slice(offset,offset+frameSamples).buffer);offset+=frameSamples}voice.pending=merged.slice(offset)}
+function downsample(input,fromRate,toRate){
+  const ratio=fromRate/toRate;
+  const length=Math.max(1,Math.round(input.length/ratio));
+  const out=new Int16Array(length);
+  for(let i=0;i<length;i++){
+    const start=Math.floor(i*ratio),end=Math.min(input.length,Math.max(start+1,Math.floor((i+1)*ratio)));
+    let sum=0,count=0;
+    for(let j=start;j<end;j++){sum+=input[j];count++}
+    const sample=count?sum/count:0;
+    out[i]=Math.max(-1,Math.min(1,sample))*0x7fff;
+  }
+  return out.buffer;
+}
+function pcm16ToContext(buffer,fromRate,toRate){
+  const input=new Int16Array(buffer);
+  if(!input.length)return new Float32Array(0);
+  const length=Math.max(1,Math.round(input.length*toRate/fromRate));
+  const out=new Float32Array(length);
+  const step=fromRate/toRate;
+  for(let i=0;i<length;i++){
+    const pos=i*step;
+    const lo=Math.min(input.length-1,Math.floor(pos));
+    const hi=Math.min(input.length-1,lo+1);
+    const f=pos-lo;
+    out[i]=((input[lo]*(1-f)+input[hi]*f)/32768);
+  }
+  return out;
+}
+async function setupPlaybackWorklet(){
+  if(!voice.ctx?.audioWorklet||typeof AudioWorkletNode==='undefined')return false;
+  const source=[
+    "class AirSIMPlaybackProcessor extends AudioWorkletProcessor {",
+    " constructor(){super();this.q=[];this.offset=0;this.buffered=0;this.started=false;this.target=Math.round(sampleRate*0.14);this.max=Math.round(sampleRate*0.50);this.underruns=0;this.dropped=0;this.port.onmessage=e=>this.msg(e.data||{});}",
+    " msg(m){if(m.type==='reset'){this.q=[];this.offset=0;this.buffered=0;this.started=false;return;}if(m.type!=='pcm'||!m.samples)return;const a=new Float32Array(m.samples);while(this.buffered+a.length>this.max&&this.q.length){const first=this.q.shift();this.buffered-=Math.max(0,first.length-this.offset);this.offset=0;this.dropped++;}this.q.push(a);this.buffered+=a.length;if(!this.started&&this.buffered>=this.target)this.started=true;if((this.dropped&15)===1)this.port.postMessage({type:'drop',count:this.dropped});}",
+    " process(inputs,outputs){const out=outputs[0]&&outputs[0][0];if(!out)return true;out.fill(0);if(!this.started)return true;let i=0;while(i<out.length){if(!this.q.length){this.started=false;this.underruns++;this.port.postMessage({type:'underrun',count:this.underruns});break;}const a=this.q[0];const n=Math.min(out.length-i,a.length-this.offset);out.set(a.subarray(this.offset,this.offset+n),i);i+=n;this.offset+=n;this.buffered-=n;if(this.offset>=a.length){this.q.shift();this.offset=0;}}return true;}",
+    "}",
+    "registerProcessor('airsim-playback',AirSIMPlaybackProcessor);"
+  ].join("\n");
+  const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+  try{
+    await voice.ctx.audioWorklet.addModule(url);
+    const node=new AudioWorkletNode(voice.ctx,'airsim-playback',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[1]});
+    node.port.onmessage=e=>{
+      if(e.data?.type==='underrun')voice.playUnderruns=Number(e.data.count)||voice.playUnderruns+1;
+      if(e.data?.type==='drop')voice.playDrops=Number(e.data.count)||voice.playDrops+1;
+    };
+    node.connect(voice.ctx.destination);
+    voice.playNode=node;
+    voice.playModuleUrl=url;
+    voice.useWorklet=true;
+    return true;
+  }catch(e){
+    URL.revokeObjectURL(url);
+    return false;
+  }
+}
+function resetPlaybackQueue(){
+  voice.playQueue=[];
+  voice.playStarted=false;
+  voice.nextPlay=0;
+  if(voice.playNode)voice.playNode.port.postMessage({type:'reset'});
+}
+function sendMicPcm(buffer){
+  if(!voice.ws||voice.ws.readyState!==WebSocket.OPEN)return;
+  const incoming=new Int16Array(buffer);
+  const pending=voice.pending||new Int16Array(0);
+  const merged=new Int16Array(pending.length+incoming.length);
+  merged.set(pending);merged.set(incoming,pending.length);
+  const frameSamples=Math.max(160,Math.round(voice.uplinkRate*0.02));
+  let offset=0;
+  while(offset+frameSamples<=merged.length){
+    voice.ws.send(merged.slice(offset,offset+frameSamples).buffer);
+    offset+=frameSamples;
+  }
+  voice.pending=merged.slice(offset);
+}
 async function playPcm(buffer){
-  if(!voice.ctx)return;
+  if(!voice.ctx||!(buffer instanceof ArrayBuffer)||buffer.byteLength<2)return;
   if(voice.ctx.state!=='running')await voice.ctx.resume();
-  if(!(buffer instanceof ArrayBuffer)||buffer.byteLength<2)return;
+  if(voice.useWorklet&&voice.playNode){
+    const samples=pcm16ToContext(buffer,voice.downlinkRate,voice.ctx.sampleRate);
+    voice.playNode.port.postMessage({type:'pcm',samples:samples.buffer},[samples.buffer]);
+    return;
+  }
+  // Compatibility fallback for browsers without AudioWorklet.
   voice.playQueue.push(new Int16Array(buffer));
-
   const frameSeconds=(buffer.byteLength/2)/voice.downlinkRate;
   const warmupFrames=Math.max(5,Math.ceil(voice.targetLead/Math.max(frameSeconds,0.02)));
   if(!voice.playStarted&&voice.playQueue.length<warmupFrames)return;
-
   const now=voice.ctx.currentTime;
-  if(!voice.playStarted){
-    voice.nextPlay=now+voice.targetLead;
-    voice.playStarted=true;
-  }else if(voice.nextPlay<now+voice.minLead){
-    // Rebuffer after an underrun instead of scheduling late buffers
-    // immediately. This prevents the clicks/stutter heard on jittery LAN RTP.
-    voice.playUnderruns++;
-    voice.nextPlay=now+voice.targetLead;
-  }
-
+  if(!voice.playStarted){voice.nextPlay=now+voice.targetLead;voice.playStarted=true}
+  else if(voice.nextPlay<now+voice.minLead){voice.playUnderruns++;voice.nextPlay=now+voice.targetLead}
   while(voice.playQueue.length&&voice.nextPlay<now+voice.maxLead){
     const samples=voice.playQueue.shift();
     const audio=voice.ctx.createBuffer(1,samples.length,voice.downlinkRate);
     const channel=audio.getChannelData(0);
     for(let i=0;i<samples.length;i++)channel[i]=samples[i]/32768;
-    const source=voice.ctx.createBufferSource();
-    source.buffer=audio;
-    source.connect(voice.ctx.destination);
-    source.start(voice.nextPlay);
-    voice.nextPlay+=audio.duration;
+    const src=voice.ctx.createBufferSource();
+    src.buffer=audio;src.connect(voice.ctx.destination);src.start(voice.nextPlay);voice.nextPlay+=audio.duration;
   }
 }
-async function startVoice(){const d=current();if(!d)throw Error('Select a connected Air8000 device first.');try{voiceStatus('Starting microphone / speaker…');if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone requires HTTPS or http://localhost:8080. Open the portal on the Windows PC using http://localhost:8080, or configure HTTPS for the LAN address.');if(voice.ws)await stopVoice();const AudioContextClass=window.AudioContext||window.webkitAudioContext;if(!AudioContextClass)throw Error('Web Audio is unavailable');voice.ctx=new AudioContextClass({latencyHint:'interactive'});await voice.ctx.resume();voice.stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});const ticket=await api('/api/devices/'+encodeURIComponent(d.device_id)+'/media-ticket',{method:'POST'});voice.downlinkRate=Number(ticket.downlink_sample_rate||ticket.sample_rate)===16000?16000:8000;voice.uplinkRate=Number(ticket.uplink_sample_rate)===8000?8000:16000;voice.pending=new Int16Array(0);voice.downlinkPackets=0;voice.ws=new WebSocket(ticket.ws_url);voice.ws.binaryType='arraybuffer';voice.ws.onmessage=async e=>{let data=e.data;if(data instanceof Blob)data=await data.arrayBuffer();if(data instanceof ArrayBuffer){voice.downlinkPackets++;if(voice.downlinkPackets===1){const live=current();const cellular=live?.cellular_voice_rate||0;voiceStatus((ticket.real_early_media?'Receiving carrier/bridge media':'Speaker receiving Air8000 audio')+' · SIP RTP '+voice.downlinkRate+' Hz'+(cellular?' · cellular '+cellular+' Hz '+(live?.voice_codec||''):'')+' · jitter buffered');}try{await playPcm(data)}catch(err){voiceStatus('Speaker error: '+err.message)}}};voice.ws.onclose=()=>voiceStatus('Voice bridge disconnected');await new Promise((resolve,reject)=>{voice.ws.onopen=resolve;voice.ws.onerror=()=>reject(Error('media WebSocket failed'))});await voice.ctx.resume();voice.source=voice.ctx.createMediaStreamSource(voice.stream);voice.processor=voice.ctx.createScriptProcessor(1024,1,1);voice.processor.onaudioprocess=e=>sendMicPcm(downsample(e.inputBuffer.getChannelData(0),voice.ctx.sampleRate,voice.uplinkRate));const mute=voice.ctx.createGain();mute.gain.value=0;voice.source.connect(voice.processor);voice.processor.connect(mute);mute.connect(voice.ctx.destination);voiceStatus((ticket.real_early_media?'Carrier/phone ringback media ready':'Live two-way voice connected')+' · RTP '+voice.downlinkRate+' Hz · 20 ms paced · 140 ms playout buffer');}catch(e){await stopVoice();voiceStatus('Voice error: '+e.message);throw e}}
-async function stopVoice(){if(voice.processor)voice.processor.disconnect();if(voice.source)voice.source.disconnect();if(voice.stream)voice.stream.getTracks().forEach(t=>t.stop());if(voice.ctx)await voice.ctx.close();if(voice.ws)voice.ws.close();voice={ws:null,ctx:null,stream:null,source:null,processor:null,nextPlay:0,downlinkRate:8000,uplinkRate:16000,pending:new Int16Array(0),downlinkPackets:0,playQueue:[],playStarted:false,playChain:Promise.resolve(),playUnderruns:0,targetLead:0.14,minLead:0.06,maxLead:0.30};voiceStatus('Voice bridge stopped')}
+async function openMediaSocket(deviceID,reconnecting=false){
+  const token=++voice.socketGeneration;
+  const ticket=await api('/api/devices/'+encodeURIComponent(deviceID)+'/media-ticket',{method:'POST'});
+  if(!voice.wantActive||token!==voice.socketGeneration)throw Error('voice session changed');
+  voice.downlinkRate=Number(ticket.downlink_sample_rate||ticket.sample_rate)===16000?16000:8000;
+  voice.uplinkRate=Number(ticket.uplink_sample_rate)===16000?16000:8000;
+  voice.ticket=ticket;
+  voice.pending=new Int16Array(0);
+  resetPlaybackQueue();
+
+  const ws=new WebSocket(ticket.ws_url);
+  ws.binaryType='arraybuffer';
+  await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{try{ws.close()}catch{};reject(Error('media WebSocket timeout'))},5000);
+    ws.onopen=()=>{clearTimeout(timer);resolve()};
+    ws.onerror=()=>{clearTimeout(timer);reject(Error('media WebSocket failed'))};
+    ws.onclose=()=>{clearTimeout(timer);reject(Error('media WebSocket closed during connect'))};
+  });
+  if(!voice.wantActive||token!==voice.socketGeneration){try{ws.close()}catch{};throw Error('voice session changed')}
+  const old=voice.ws;
+  voice.ws=ws;
+  if(old&&old!==ws)try{old.close(4000,'replaced')}catch{}
+  voice.mediaConnectedAt=Date.now();
+  voice.lastDownlinkAt=0;
+  ws.onmessage=async e=>{
+    if(voice.ws!==ws)return;
+    let data=e.data;
+    if(data instanceof Blob)data=await data.arrayBuffer();
+    if(data instanceof ArrayBuffer){
+      voice.downlinkPackets++;
+      voice.lastDownlinkAt=Date.now();
+      if(voice.downlinkPackets===1||reconnecting){
+        const live=devices.find(x=>x.device_id===deviceID);
+        const cellular=live?.cellular_voice_rate||0;
+        voiceStatus((reconnecting?'Voice media restored':'Receiving carrier/bridge media')+' · RTP '+voice.downlinkRate+' Hz'+(cellular?' · cellular '+cellular+' Hz '+(live?.voice_codec||''):'')+' · continuous buffered playback');
+        reconnecting=false;
+      }
+      try{await playPcm(data)}catch(err){voiceStatus('Speaker error: '+err.message)}
+    }
+  };
+  ws.onerror=()=>{};
+  ws.onclose=()=>{
+    if(voice.ws!==ws)return;
+    voice.ws=null;
+    if(voice.wantActive)scheduleMediaReconnect('media socket disconnected');
+  };
+  return ticket;
+}
+function scheduleMediaReconnect(reason){
+  if(!voice.wantActive||voice.reconnectTask)return;
+  const token=++voice.reconnectToken;
+  const deadline=Date.now()+45000;
+  voiceStatus('Voice media reconnecting — '+reason);
+  voice.reconnectTask=(async()=>{
+    let delay=100;
+    let attempt=0;
+    while(voice.wantActive&&token===voice.reconnectToken&&Date.now()<deadline){
+      if(attempt++)await sleep(delay);
+      try{
+        await openMediaSocket(voice.deviceID,true);
+        voiceStatus('Voice media restored automatically');
+        return;
+      }catch(e){
+        delay=Math.min(2500,Math.round(delay*1.6));
+      }
+    }
+    if(voice.wantActive&&token===voice.reconnectToken)voiceStatus('Voice recovery timed out — call is still active; press audio/call again to retry');
+  })().finally(()=>{if(token===voice.reconnectToken)voice.reconnectTask=null});
+}
+function startVoiceWatchdog(){
+  if(voice.watchdog)clearInterval(voice.watchdog);
+  voice.watchdog=setInterval(()=>{
+    if(!voice.wantActive)return;
+    const ws=voice.ws;
+    if(!ws||ws.readyState!==WebSocket.OPEN)return;
+    if(activeCallState==='IDLE'||activeCallState==='ENDED')return;
+    const reference=voice.lastDownlinkAt||voice.mediaConnectedAt;
+    if(reference&&Date.now()-reference>5000){
+      voiceStatus('Media stalled — recovering automatically…');
+      try{ws.close(4001,'media-stalled')}catch{}
+    }
+  },1000);
+}
+async function startVoice(){
+  const d=current();
+  if(!d)throw Error('Select a connected Air8000 device first.');
+  try{
+    if(voice.wantActive||voice.ctx)await stopVoice();
+    voice=createVoiceState();
+    voice.wantActive=true;
+    voice.deviceID=d.device_id;
+    voiceStatus('Starting microphone / speaker…');
+    if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone requires HTTPS or http://localhost:8080.');
+    const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+    if(!AudioContextClass)throw Error('Web Audio is unavailable');
+
+    voice.ctx=new AudioContextClass({latencyHint:'interactive'});
+    await voice.ctx.resume();
+    await setupPlaybackWorklet();
+    voice.stream=await navigator.mediaDevices.getUserMedia({audio:{
+      channelCount:{ideal:1},sampleRate:{ideal:48000},sampleSize:{ideal:16},
+      echoCancellation:true,noiseSuppression:true,autoGainControl:true
+    }});
+    voice.source=voice.ctx.createMediaStreamSource(voice.stream);
+    voice.micHighPass=voice.ctx.createBiquadFilter();
+    voice.micHighPass.type='highpass';voice.micHighPass.frequency.value=80;voice.micHighPass.Q.value=0.707;
+    voice.micLowPass=voice.ctx.createBiquadFilter();
+    voice.micLowPass.type='lowpass';voice.micLowPass.frequency.value=3400;voice.micLowPass.Q.value=0.707;
+    voice.processor=voice.ctx.createScriptProcessor(1024,1,1);
+    voice.processor.onaudioprocess=e=>sendMicPcm(downsample(e.inputBuffer.getChannelData(0),voice.ctx.sampleRate,voice.uplinkRate));
+    voice.muteNode=voice.ctx.createGain();voice.muteNode.gain.value=0;
+    voice.source.connect(voice.micHighPass);voice.micHighPass.connect(voice.micLowPass);voice.micLowPass.connect(voice.processor);voice.processor.connect(voice.muteNode);voice.muteNode.connect(voice.ctx.destination);
+
+    const ticket=await openMediaSocket(d.device_id,false);
+    startVoiceWatchdog();
+    voiceStatus((ticket.real_early_media?'Carrier/phone media ready':'Live two-way voice connected')+' · continuous AudioWorklet buffer · automatic 45 s recovery');
+  }catch(e){
+    await stopVoice();
+    voiceStatus('Voice error: '+e.message);
+    throw e;
+  }
+}
+async function stopVoice(){
+  const old=voice;
+  old.wantActive=false;
+  old.reconnectToken++;
+  old.socketGeneration++;
+  if(old.watchdog)clearInterval(old.watchdog);
+  if(old.ws)try{old.ws.close(1000,'voice-stop')}catch{}
+  if(old.processor)try{old.processor.disconnect()}catch{}
+  if(old.source)try{old.source.disconnect()}catch{}
+  if(old.micHighPass)try{old.micHighPass.disconnect()}catch{}
+  if(old.micLowPass)try{old.micLowPass.disconnect()}catch{}
+  if(old.muteNode)try{old.muteNode.disconnect()}catch{}
+  if(old.playNode)try{old.playNode.disconnect()}catch{}
+  if(old.stream)old.stream.getTracks().forEach(t=>t.stop());
+  if(old.ctx)try{await old.ctx.close()}catch{}
+  if(old.playModuleUrl)URL.revokeObjectURL(old.playModuleUrl);
+  voice=createVoiceState();
+  voiceStatus('Voice bridge stopped');
+}
 function simplifyBleForm(){const pairing=document.querySelector('#ble-pairing');if(pairing)pairing.closest('.field')?.style.setProperty('display','none');const bssid=document.querySelector('#wifi-bssid');if(bssid)bssid.closest('.field')?.style.setProperty('display','none');const security=document.querySelector('#wifi-security');if(security)security.closest('.field')?.style.setProperty('display','none');const scan=[...document.querySelectorAll('button')].find(b=>/scan wi/i.test(b.textContent));if(scan)scan.style.display='none';const send=[...document.querySelectorAll('button')].find(b=>/send.*ble/i.test(b.textContent));if(send)send.style.display='none';const ssid=document.querySelector('#wifi-ssid');if(!ssid)return;let picker=document.querySelector('#ble-ssid');if(!picker){picker=document.createElement('select');picker.id='ble-ssid';picker.style.minWidth='240px';picker.innerHTML='<option value="">Connect over BLE to scan networks</option>';picker.onchange=()=>{ssid.value=picker.value;const network=bleNetworks.find(n=>n.ssid===picker.value);if(bssid)bssid.value=network?.bssid||'';if(security)security.value=network?.security||'auto'};ssid.style.display='none';ssid.parentElement?.insertBefore(picker,ssid)}if(!document.querySelector('#ble-submit')){const submit=document.createElement('button');submit.id='ble-submit';submit.textContent='Connect Air8000 to selected Wi-Fi';submit.onclick=bleConnectWifi;const host=document.querySelector('#wifi-password')?.closest('.field')?.parentElement||document.querySelector('#wifi');host?.appendChild(submit)}}
 function ensureBlePicker(){let picker=document.querySelector('#ble-ssid');if(picker)return picker;const ssid=document.querySelector('#wifi-ssid');if(!ssid)return null;picker=document.createElement('select');picker.id='ble-ssid';picker.style.minWidth='240px';picker.setAttribute('aria-label','Scanned Wi-Fi networks');picker.onchange=()=>{ssid.value=picker.value;const network=bleNetworks.find(n=>n.ssid===picker.value);const bssid=document.querySelector('#wifi-bssid');const security=document.querySelector('#wifi-security');if(bssid)bssid.value=network?.bssid||'';if(security)security.value=network?.security||'auto'};ssid.style.display='none';ssid.parentElement?.insertBefore(picker,ssid);return picker}
 function populateBleNetworks(){const picker=ensureBlePicker();if(!picker)return;const current=picker.value;picker.innerHTML=bleNetworks.map(n=>`<option value="${esc(n.ssid)}">${esc(n.ssid)}${n.rssi==null?'':` (${n.rssi} dBm)`}</option>`).join('')||'<option value="">No Wi-Fi networks found</option>';if(current&&[...picker.options].some(o=>o.value===current))picker.value=current;picker.dispatchEvent(new Event('change'));const el=document.querySelector('#ble-networks');if(el)el.textContent=bleNetworks.length?`Found ${bleNetworks.length} Wi-Fi network(s). Select one above, enter the password, then connect.`:'No Wi-Fi networks found.'}
