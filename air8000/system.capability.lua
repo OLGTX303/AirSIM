@@ -16,7 +16,7 @@ function M.probe(env)
         fota=present(env.fota),
         direct_pcm=fn(cc,"record") and fn(cc,"input") and fn(cc,"extern_source") and av.DATA_CODEC_TYPE_RAW~=nil,
         carrier_rtp_pcm=cc.AUDIO_MODE_BRIDGE_PCM~=nil and fn(cc,"bridgePcmStats") and fn(cc,"bridgeAudioStop") and
-            fn(vp,"setAudioMode") and vp.AUDIO_MODE_BRIDGE~=nil and fn(vp,"start") and fn(vp,"stop") and fn(vp,"on"),
+            fn(vp,"setAudioMode") and vp.AUDIO_MODE_BRIDGE~=nil and fn(vp,"pcmIn") and fn(vp,"pcmOut") and fn(vp,"start") and fn(vp,"stop") and fn(vp,"on"),
         sip_bridge=present(env.sip),
     }
     c.real_early_media=c.carrier_rtp_pcm
