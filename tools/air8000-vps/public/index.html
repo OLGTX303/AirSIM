@@ -122,16 +122,21 @@ function downsample(input,fromRate,toRate){
 // previous frame's last sample and the fractional phase carry over, so 20 ms
 // frames no longer end on a held sample (an audible 50 Hz roughness).
 function makeInterpolator(fromRate,toRate){
-  const step=fromRate/toRate;let prev=0,pos=0;
+  const step=fromRate/toRate;let pos=0;
   return {fromRate,toRate,run(input){
+    if(!input.length)return new Float32Array(0);
+    // Emit exactly input.length * toRate / fromRate samples. The final
+    // fractional samples use a one-sample linear extrapolation so the next
+    // frame starts on time instead of losing samples and draining playback.
     const out=new Float32Array(Math.ceil((input.length-pos)/step)+1);let n=0;
-    // pos may start in [-1,0): index -1 is the previous frame's last sample.
-    while(pos<input.length-1){
+    while(pos<input.length-1e-7){
       const i=Math.floor(pos),f=pos-i;
-      const a=i<0?prev:input[i],b=input[i+1];
-      out[n++]=(a*(1-f)+b*f)/32768;pos+=step;
+      const a=input[Math.min(i,input.length-1)];
+      const next=i+1<input.length?input[i+1]:a+(i>0?a-input[i-1]:0);
+      out[n++]=(a*(1-f)+next*f)/32768;pos+=step;
     }
-    prev=input[input.length-1];pos-=input.length;
+    pos-=input.length;
+    if(Math.abs(pos)<1e-6)pos=0;
     return out.slice(0,n);
   }};
 }

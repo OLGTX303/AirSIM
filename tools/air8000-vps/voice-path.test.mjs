@@ -79,6 +79,10 @@ const ramp=new Int16Array(960);for(let i=0;i<ramp.length;i++)ramp[i]=i*10;
 const play=makeInterpolator(16000,48000);const parts=[];
 for(let i=0;i<ramp.length;i+=320)parts.push(...play.run(ramp.subarray(i,i+320)));
 for(let i=1;i<parts.length;i++)assert.ok(Math.abs(parts[i]-parts[i-1]-10/3/32768)<1e-6,`playback seam at ${i}`);
-assert.ok(Math.abs(parts.length-ramp.length*3)<=3);
+assert.equal(parts.length,ramp.length*3);
+const narrow=new Int16Array(320);for(let i=0;i<narrow.length;i++)narrow[i]=i*10;
+const narrowPlay=makeInterpolator(8000,48000);let narrowCount=0;
+for(let i=0;i<3;i++)narrowCount+=narrowPlay.run(narrow).length;
+assert.equal(narrowCount,320*6*3);
 
 console.log("Air8000 paced voice-path tests passed");
