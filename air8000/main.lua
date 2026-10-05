@@ -105,6 +105,12 @@ local function set_bridge_tone(enabled,reason)
 
     local function apply()
         if generation~=bridge_tone_generation then return false end
+        if enabled then
+            -- The retry task can outlive the 183 phase; never start ringback
+            -- once the cellular leg is carrying speech.
+            local current=_G.call_service and _G.call_service.current
+            if not current or tostring(current.state or "")=="CONNECTED" then return true end
+        end
         local applied=false
         if cc and type(cc.bridgeTone)=="function" then
             local ok,result=pcall(cc.bridgeTone,enabled)
@@ -463,6 +469,7 @@ if media_backend=="sip_bridge" and exsip then
                 end
                 if log then log.info("airsim.sip","resume_existing_cc",tostring(current.state or "")) end
                 if tostring(current.state or "")=="CONNECTED" then
+                    disable_bridge_tone("sip_resume_connected")
                     pcall(exsip.accept)
                     if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"sip_resume") end
                 else
@@ -485,8 +492,13 @@ if media_backend=="sip_bridge" and exsip then
             end
         elseif event_type=="media" and action=="ready" then
             announce_media("media.open")
-            if _G.call_service and _G.call_service.current then
+            -- A gateway resume re-opens SIP media on an already CONNECTED
+            -- cellular call. Ringback must never be mixed into live speech.
+            local current=_G.call_service and _G.call_service.current
+            if current and tostring(current.state or "")~="CONNECTED" then
                 set_bridge_tone(true,"sip_183_media_ready")
+            else
+                disable_bridge_tone("sip_media_ready_connected")
             end
         elseif event_type=="media" and action=="stop" then
             disable_bridge_tone("sip_media_stop")

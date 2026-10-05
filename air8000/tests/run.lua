@@ -141,6 +141,18 @@ ok("SIP bridge uses official ringback and reports negotiated VoLTE rate", functi
   assert(src:find('wideband_volte',1,true))
 end)
 
+ok("SIP media resume never mixes ringback into a connected call", function()
+  local fp=assert(io.open("main.lua","r"))
+  local src=fp:read("*a")
+  fp:close()
+  local ready=assert(src:find('event_type=="media" and action=="ready"',1,true))
+  local block=src:sub(ready,ready+600)
+  assert(block:find('~="CONNECTED"',1,true))
+  assert(block:find('sip_media_ready_connected',1,true))
+  assert(src:find('sip_resume_connected',1,true))
+  assert(src:find('never start ringback',1,true))
+end)
+
 ok("SIP bridge can refresh and resume after gateway restart", function()
   local fp=assert(io.open("main.lua","r"))
   local src=fp:read("*a")

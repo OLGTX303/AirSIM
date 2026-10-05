@@ -4,11 +4,16 @@ import fs from "node:fs";
 const server=fs.readFileSync(new URL("./server.mjs",import.meta.url),"utf8");
 const page=fs.readFileSync(new URL("./public/index.html",import.meta.url),"utf8");
 
-assert.match(server,/setInterval\(\(\)=>flushCarrierUplink\(session\),20\)/);
-assert.match(server,/setInterval\(\(\)=>playoutCarrierDownlink\(session\),20\)/);
+assert.match(server,/setInterval\(\(\)=>pumpCarrierMedia\(session\),10\)/);
+assert.match(server,/performance\.now\(\)-session\.clockStart/);
+assert.match(server,/mediaFramesDue\(session,"rxClock"\)/);
+assert.match(server,/mediaFramesDue\(session,"txClock"\)/);
+assert.match(server,/MEDIA_MAX_CATCHUP_FRAMES/);
 assert.match(server,/rtp_jitter_ms/);
-assert.match(server,/resamplePcm16\(decodePcmuPayload\(payload\),8000,16000\)/);
-assert.match(server,/pcm=Buffer\.alloc\(640\)/);
+assert.match(server,/pcm8=decodePcmuPayload\(payload\)/);
+assert.match(server,/const pcm=session\.upsample\(pcm8\)/);
+assert.match(server,/session\.downsample\(Buffer\.isBuffer\(raw\)/);
+assert.doesNotMatch(server,/resamplePcm16/);
 assert.match(server,/Do not repeat carrier audio/);
 assert.match(server,/rtp_idle_frames/);
 assert.match(server,/No later packet means no sequence gap/);
@@ -25,6 +30,16 @@ assert.match(server,/sipServer\.hangup\(event\.device_id\)/);
 assert.match(server,/carrier call ended/);
 assert.match(server,/Device-side carrier release is authoritative/);
 assert.doesNotMatch(server,/while\(session\.pendingUplink\.length>=320\)/);
+assert.match(server,/session\.rxQueue\.size>Math\.ceil\(session\.rxHoldMs\/MEDIA_FRAME_MS\)/);
+assert.match(server,/rtp_latency_trim_frames/);
+assert.match(server,/session\.rxGapOpen \|\| session\.rxQueue\.size>=session\.rxWarmupFrames/);
+assert.match(server,/parsed\.ssrc!==session\.rxSsrc/);
+assert.match(server,/rtp_stream_resets/);
+assert.match(server,/txPrimeFrames:3/);
+assert.match(server,/uplink_underrun_frames/);
+assert.match(server,/const keep=PCMU_FRAME_BYTES\*4/);
+assert.match(server,/releaseRtpMedia\(event\.device_id\)/);
+assert.match(server,/resetCarrierUplink\(session\)/);
 
 assert.match(page,/targetLead:0\.08/);
 assert.match(page,/minLead:0\.04/);
@@ -46,5 +61,21 @@ assert.match(server,/SERVER_INSTANCE_ID/);
 assert.match(server,/sipServer\.resume\(d,session\)/);
 assert.match(server,/Do not clear session\.remote/);
 assert.match(page,/Cellular VoLTE/);
+
+
+// Browser resamplers: execute the page's own functions.
+const pick=name=>{const start=page.indexOf(`function ${name}(`);assert.ok(start>=0,name);let depth=0;for(let i=page.indexOf("{",start);i<page.length;i++){if(page[i]==="{")depth++;else if(page[i]==="}"&&--depth===0)return page.slice(start,i+1)}throw Error(name)};
+const {makeDecimator,makeInterpolator}=new Function(`${pick("makeDecimator")}\n${pick("makeInterpolator")}\nreturn {makeDecimator,makeInterpolator};`)();
+for(const rate of [48000,44100]){
+  const mic=makeDecimator(rate,16000);let produced=0;const blocks=Math.round(rate*10/1024);
+  for(let block=0;block<blocks;block++)produced+=new Int16Array(mic.run(new Float32Array(1024).fill(0.25))).length;
+  const expected=Math.floor(blocks*1024*16000/rate);
+  assert.ok(Math.abs(produced-expected)<=1,`mic ${rate}->16000 exact rate produced=${produced} expected=${expected}`);
+}
+const ramp=new Int16Array(960);for(let i=0;i<ramp.length;i++)ramp[i]=i*10;
+const play=makeInterpolator(16000,48000);const parts=[];
+for(let i=0;i<ramp.length;i+=320)parts.push(...play.run(ramp.subarray(i,i+320)));
+for(let i=1;i<parts.length;i++)assert.ok(Math.abs(parts[i]-parts[i-1]-10/3/32768)<1e-6,`playback seam at ${i}`);
+assert.ok(Math.abs(parts.length-ramp.length*3)<=3);
 
 console.log("Air8000 paced voice-path tests passed");

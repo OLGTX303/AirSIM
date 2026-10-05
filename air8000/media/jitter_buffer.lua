@@ -1,5 +1,5 @@
 local M = {}
-function M.new(capacity) return { capacity=capacity or 32, packets={}, next=nil, underflows=0, overflows=0, duplicates=0, late=0 } end
+function M.new(capacity) return setmetatable({ capacity=capacity or 32, packets={}, next=nil, underflows=0, overflows=0, duplicates=0, late=0 },{__index=M}) end
 function M:push(packet)
     local s=packet.header.sequence; if self.packets[s] then self.duplicates=self.duplicates+1; return false,"duplicate" end
     if self.next and s < self.next then self.late=self.late+1; return false,"late" end

@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import dgram from "node:dgram";
 import { WebSocketServer } from "ws";
-import { buildRtpPacket, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState, resamplePcm16 } from "./rtp-pcm.mjs";
+import { buildRtpPacket, createDecimator2x, createInterpolator2x, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState } from "./rtp-pcm.mjs";
 import { SipUdpServer } from "./sip-udp.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
@@ -30,6 +30,10 @@ const mediaPeers = new Map();
 const mediaStats = new Map();
 const rtpSessions = new Map();
 const usedRtpPorts = new Set();
+const MEDIA_FRAME_MS = 20;
+const MEDIA_MAX_CATCHUP_FRAMES = 5;
+const PCMU_FRAME_BYTES = 320; // 160 S16LE samples at 8 kHz
+const SILENT_PCMU_FRAME = Buffer.alloc(PCMU_FRAME_BYTES);
 
 function sameSecret(a, b) {
   const left = Buffer.from(String(a || "")); const right = Buffer.from(String(b || ""));
@@ -47,6 +51,7 @@ function emptyMediaStats() {
     dropped_downlink_frames:0,rtp_rx_packets:0,rtp_tx_packets:0,rtp_tx_errors:0,
     rtp_lost_packets:0,rtp_late_packets:0,rtp_duplicate_packets:0,
     rtp_reordered_packets:0,rtp_jitter_ms:0,audio_concealment_frames:0,rtp_idle_frames:0,
+    rtp_stream_resets:0,rtp_latency_trim_frames:0,uplink_underrun_frames:0,
     uplink_dropped_frames:0,last_activity:Date.now(),
     downlink_peak:0,downlink_rms:0,downlink_silent_frames:0,downlink_clipped_frames:0,
     uplink_peak:0,uplink_rms:0,uplink_silent_frames:0,uplink_clipped_frames:0
@@ -164,10 +169,18 @@ async function ensureRtpSession(deviceID) {
     generation:1,
     tx:randomRtpState(crypto.randomBytes),
     txStarted:false,
+    txPrimed:false,
+    txPrimeFrames:3,
+    uplinkActive:false,
     pendingUplink:Buffer.alloc(0),
+    // Streaming resamplers keep filter history across 20 ms frames.
+    upsample:createInterpolator2x(),
+    downsample:createDecimator2x(),
     lastRx:0,
     rxQueue:new Map(),
     rxExpected:null,
+    rxSsrc:null,
+    rxGapOpen:false,
     rxStarted:false,
     // The Air8000 SIP bridge can deliver several RTP packets in a burst.
     // Keep enough media queued to absorb that burst before clocking the
@@ -179,12 +192,17 @@ async function ensureRtpSession(deviceID) {
     lastArrivalMs:0,
     lastRtpTimestamp:null,
     jitterMs:0,
-    rxTimer:null,
-    txTimer:null,
+    // One monotonic media clock drives both directions. Node/Windows timers
+    // fire late (49.5/s measured for a 20 ms interval on Linux, worse on
+    // Windows), so each tick processes every 20 ms frame that is due instead
+    // of exactly one frame per callback.
+    clockStart:performance.now(),
+    rxClock:0,
+    txClock:0,
+    mediaTimer:null,
   };
   rtpSessions.set(deviceID,session);
-  session.rxTimer=setInterval(()=>playoutCarrierDownlink(session),20);
-  session.txTimer=setInterval(()=>flushCarrierUplink(session),20);
+  session.mediaTimer=setInterval(()=>pumpCarrierMedia(session),10);
 
   socket.on("message",(packet,rinfo)=>{
     const parsed=parseRtpPacket(packet);
@@ -210,6 +228,14 @@ async function ensureRtpSession(deviceID) {
     session.lastArrivalMs=now;
     session.lastRtpTimestamp=parsed.timestamp;
 
+    // A restarted device VoIP engine sends a new SSRC/sequence space. Resync
+    // instead of discarding the new stream as "late" or waiting on a huge gap.
+    const jumped=session.rxExpected!==null && Math.abs(rtpSeqDelta(parsed.sequence,session.rxExpected))>100;
+    if(session.rxExpected!==null && (jumped || (session.rxSsrc!==null && parsed.ssrc!==session.rxSsrc))){
+      resyncCarrierDownlink(session);
+      stats.rtp_stream_resets++;
+    }
+    session.rxSsrc=parsed.ssrc;
     if(session.rxExpected===null)session.rxExpected=parsed.sequence;
     const delta=rtpSeqDelta(parsed.sequence,session.rxExpected);
     if(delta<0){
@@ -267,26 +293,67 @@ const sipServer = new SipUdpServer({
       // browser and SIP dialog are released even if the device-side SIP
       // teardown notification is delayed or absent.
       sipServer.hangup(event.device_id);
+      releaseRtpMedia(event.device_id);
       const peer=mediaPeers.get(event.device_id);
       if(peer?.readyState===1)peer.close(4001,"carrier call ended");
     }
   },
 });
 
+function resyncCarrierDownlink(session) {
+  session.rxQueue.clear();
+  session.rxExpected=null;
+  session.rxSsrc=null;
+  session.rxGapOpen=false;
+  session.rxStarted=false;
+  session.rxMissingSince=0;
+  session.lastArrivalMs=0;
+  session.lastRtpTimestamp=null;
+}
+function resetCarrierUplink(session) {
+  session.txPrimed=false;
+  session.uplinkActive=false;
+  session.pendingUplink=Buffer.alloc(0);
+  session.downsample=createDecimator2x();
+}
 function resetRtpSession(session) {
   session.generation++;
   session.remote=null;
   session.tx=randomRtpState(crypto.randomBytes);
   session.txStarted=false;
-  session.pendingUplink=Buffer.alloc(0);
+  resetCarrierUplink(session);
   session.lastRx=0;
-  session.rxQueue.clear();
-  session.rxExpected=null;
-  session.rxStarted=false;
-  session.rxMissingSince=0;
-  session.lastArrivalMs=0;
-  session.lastRtpTimestamp=null;
+  resyncCarrierDownlink(session);
+  session.upsample=createInterpolator2x();
   session.jitterMs=0;
+}
+// Stop RTP toward the device once the carrier call is gone; the next dial or
+// resume allocates a fresh RTP generation.
+function releaseRtpMedia(deviceID) {
+  const session=rtpSessions.get(deviceID);
+  if(session)resetRtpSession(session);
+}
+function mediaFramesDue(session,key) {
+  const target=Math.floor((performance.now()-session.clockStart)/MEDIA_FRAME_MS);
+  let due=target-session[key];
+  // After an event-loop stall, do not burst an unbounded backlog; the jitter
+  // buffer latency trim absorbs the remainder.
+  if(due>MEDIA_MAX_CATCHUP_FRAMES){session[key]=target-MEDIA_MAX_CATCHUP_FRAMES;due=MEDIA_MAX_CATCHUP_FRAMES}
+  if(due<=0)return 0;
+  session[key]+=due;
+  return due;
+}
+function pumpCarrierMedia(session) {
+  for(let n=mediaFramesDue(session,"rxClock");n>0;n--)playoutCarrierDownlink(session);
+  for(let n=mediaFramesDue(session,"txClock");n>0;n--)flushCarrierUplink(session);
+}
+function lowestQueuedSequence(session) {
+  let best=null,bestDelta=Infinity;
+  for(const seq of session.rxQueue.keys()){
+    const d=rtpSeqDelta(seq,session.rxExpected);
+    if(d>=0 && d<bestDelta){best=seq;bestDelta=d}
+  }
+  return best;
 }
 function playoutCarrierDownlink(session) {
   if(!session)return;
@@ -301,48 +368,67 @@ function playoutCarrierDownlink(session) {
   if(now-session.lastRx>500 && session.rxQueue.size===0){
     session.rxStarted=false;
     session.rxExpected=null;
+    session.rxGapOpen=false;
     session.rxMissingSince=0;
     return;
   }
 
+  // Bound mouth-to-ear delay. Clock drift or a burst after a Wi-Fi stall must
+  // not accumulate latency for the rest of the call.
+  if(session.rxQueue.size>Math.ceil(session.rxHoldMs/MEDIA_FRAME_MS)){
+    while(session.rxQueue.size>session.rxWarmupFrames){
+      const oldest=lowestQueuedSequence(session);
+      if(oldest===null)break;
+      session.rxQueue.delete(oldest);
+      session.rxExpected=(oldest+1)&0xffff;
+      stats.rtp_latency_trim_frames++;
+    }
+    session.rxGapOpen=false;
+    session.rxMissingSince=0;
+  }
+
   const payload=session.rxQueue.get(session.rxExpected);
-  let pcm;
+  let pcm8;
   let advanceSequence=true;
   if(payload){
     session.rxQueue.delete(session.rxExpected);
     session.rxMissingSince=0;
-    pcm=resamplePcm16(decodePcmuPayload(payload),8000,16000);
-    stats.downlink_frames++;
-    stats.downlink_bytes+=pcm.length;
-    updatePcmMetrics(stats,"downlink",pcm);
-  }else{
+    session.rxGapOpen=false;
+    pcm8=decodePcmuPayload(payload);
+  }else if(session.rxQueue.size===0){
     // No later packet means no sequence gap has been proven. This is an idle
     // carrier period, not packet loss; keep the browser clocked but retain
     // rxExpected so the next RTP packet is not misclassified as late.
-    if(session.rxQueue.size===0){
-      pcm=Buffer.alloc(640);
-      stats.rtp_idle_frames++;
-      advanceSequence=false;
-    } else {
+    pcm8=SILENT_PCMU_FRAME;
+    stats.rtp_idle_frames++;
+    advanceSequence=false;
+  }else{
     // Do not repeat carrier audio: give a late packet a short chance to arrive
-    // before declaring loss.
-    // The 20 ms playout clock continues with silence, so this cannot create
-    // a burst; it only prevents premature sequence advancement on jitter.
+    // before declaring loss. Once a gap is proven, every remaining missing
+    // sequence in that gap is concealed on its own tick without a new grace
+    // wait, so one lost packet costs one 20 ms frame rather than several.
     if(!session.rxMissingSince)session.rxMissingSince=now;
-    pcm=Buffer.alloc(640);
-    if(now-session.rxMissingSince>=session.rxMissingGraceMs){
+    pcm8=SILENT_PCMU_FRAME;
+    if(session.rxGapOpen || session.rxQueue.size>=session.rxWarmupFrames || now-session.rxMissingSince>=session.rxMissingGraceMs){
       stats.rtp_lost_packets++;
       stats.audio_concealment_frames++;
-      session.rxMissingSince=0;
+      session.rxGapOpen=true;
     } else {
       advanceSequence=false;
-    }
     }
   }
   if(advanceSequence)session.rxExpected=(session.rxExpected+1)&0xffff;
+  // Silence also runs through the interpolator so its filter rings out
+  // smoothly instead of cutting speech with a click.
+  const pcm=session.upsample(pcm8);
+  if(payload){
+    stats.downlink_frames++;
+    stats.downlink_bytes+=pcm.length;
+    updatePcmMetrics(stats,"downlink",pcm);
+  }
   stats.last_activity=Date.now();
 
-  // Keep the browser clocked at exactly one 20 ms frame per tick. The
+  // Keep the browser clocked at one 20 ms frame per due media tick. The
   // WebAudio side adds its own short playout buffer, so UDP arrival jitter
   // never directly controls speaker scheduling.
   const peer=mediaPeers.get(session.device_id);
@@ -350,10 +436,20 @@ function playoutCarrierDownlink(session) {
   else stats.dropped_downlink_frames++;
 }
 function flushCarrierUplink(session) {
-  if(!session?.remote || session.pendingUplink.length<320)return;
+  if(!session?.remote || !session.uplinkActive)return;
   const stats=getMediaStats(session.device_id);
-  const pcm=session.pendingUplink.subarray(0,320);
-  session.pendingUplink=session.pendingUplink.subarray(320);
+  // Prime 60 ms before sending speech so browser frame jitter does not starve
+  // the device jitter buffer. Underruns send PCMU silence to keep RTP timing
+  // continuous instead of leaving holes the device cannot distinguish.
+  if(!session.txPrimed && session.pendingUplink.length>=PCMU_FRAME_BYTES*session.txPrimeFrames)session.txPrimed=true;
+  let pcm=SILENT_PCMU_FRAME;
+  if(session.txPrimed && session.pendingUplink.length>=PCMU_FRAME_BYTES){
+    pcm=session.pendingUplink.subarray(0,PCMU_FRAME_BYTES);
+    session.pendingUplink=session.pendingUplink.subarray(PCMU_FRAME_BYTES);
+  }else if(session.txPrimed){
+    session.txPrimed=false;
+    stats.uplink_underrun_frames++;
+  }
   const encoded=encodePcmuFrame(pcm);
   const packet=buildRtpPacket(encoded,session.tx,0,!session.txStarted);
   session.txStarted=true;
@@ -361,23 +457,28 @@ function flushCarrierUplink(session) {
     if(err)stats.rtp_tx_errors++;
   });
   stats.rtp_tx_packets++;
-  stats.uplink_frames++;
-  stats.uplink_bytes+=pcm.length;
-  updatePcmMetrics(stats,"uplink",pcm);
+  if(pcm!==SILENT_PCMU_FRAME){
+    stats.uplink_frames++;
+    stats.uplink_bytes+=pcm.length;
+    updatePcmMetrics(stats,"uplink",pcm);
+  }
   stats.last_activity=Date.now();
 }
 function sendPcmToCarrier(deviceID,raw) {
   const session=rtpSessions.get(deviceID);
   if(!session)return false;
-  const data=resamplePcm16(Buffer.isBuffer(raw)?raw:Buffer.from(raw),16000,8000);
+  const data=session.downsample(Buffer.isBuffer(raw)?raw:Buffer.from(raw));
+  session.uplinkActive=true;
   if(data.length===0)return true;
   session.pendingUplink=Buffer.concat([session.pendingUplink,data]);
-  const max=320*12; // 240 ms hard ceiling; normal target stays below 80 ms.
+  const max=PCMU_FRAME_BYTES*12; // 240 ms hard ceiling
   if(session.pendingUplink.length>max){
-    const drop=session.pendingUplink.length-max;
-    const aligned=Math.ceil(drop/320)*320;
-    session.pendingUplink=session.pendingUplink.subarray(Math.min(aligned,session.pendingUplink.length));
-    getMediaStats(deviceID).uplink_dropped_frames+=Math.ceil(drop/320);
+    // Trim back to the 80 ms target, not to the ceiling, so a browser burst
+    // does not leave a permanent 240 ms uplink delay.
+    const keep=PCMU_FRAME_BYTES*4;
+    const drop=session.pendingUplink.length-keep;
+    session.pendingUplink=session.pendingUplink.subarray(drop);
+    getMediaStats(deviceID).uplink_dropped_frames+=Math.ceil(drop/PCMU_FRAME_BYTES);
   }
   return true;
 }
@@ -530,7 +631,11 @@ mediaWss.on("connection",(ws,deviceID)=>{
     if(d?.socket?.readyState===1)d.socket.send(raw,{binary:true});
   });
   ws.on("close",()=>{
-    if(mediaPeers.get(deviceID)===ws)mediaPeers.delete(deviceID);
+    if(mediaPeers.get(deviceID)===ws){
+      mediaPeers.delete(deviceID);
+      const session=rtpSessions.get(deviceID);
+      if(session)resetCarrierUplink(session);
+    }
     console.log(`media disconnected device=${deviceID}`);
   });
 });
@@ -647,6 +752,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
           // peer has not sent BYE yet. Preserve the event, then tear down the
           // browser/SIP media session immediately.
           sipServer.hangup(device.device_id);
+          if(sipBridgeEnabled(device))releaseRtpMedia(device.device_id);
           const peer=mediaPeers.get(device.device_id);
           if(peer?.readyState===1)peer.close(4001,"carrier call ended");
         }

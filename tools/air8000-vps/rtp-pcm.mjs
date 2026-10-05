@@ -62,6 +62,89 @@ export function resamplePcm16(pcm, fromRate, toRate) {
   return out;
 }
 
+// 63-tap Hamming-windowed sinc low-pass at 16 kHz. Cutoff 3.7 kHz keeps the
+// telephone band (300-3400 Hz) flat and rejects >4.1 kHz by about 50 dB, so
+// 16->8 kHz decimation does not fold sibilance back into speech and 8->16 kHz
+// interpolation does not create images above the PCMU band.
+function designLowpass(taps, cutoff, rate) {
+  const h = new Float64Array(taps);
+  const mid = (taps - 1) / 2;
+  const fc = cutoff / rate;
+  let sum = 0;
+  for (let i = 0; i < taps; i++) {
+    const n = i - mid;
+    const sinc = n === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * n) / (Math.PI * n);
+    h[i] = sinc * (0.54 - 0.46 * Math.cos(2 * Math.PI * i / (taps - 1)));
+    sum += h[i];
+  }
+  for (let i = 0; i < taps; i++) h[i] /= sum;
+  return h;
+}
+const SPEECH_LOWPASS_16K = designLowpass(63, 3700, 16000);
+
+function clamp16(value) {
+  return Math.max(-32768, Math.min(32767, Math.round(value)));
+}
+
+// Streaming 16 kHz -> 8 kHz S16LE decimator. Filter history and the output
+// phase carry across WebSocket frames, so frame boundaries are seamless.
+export function createDecimator2x(taps = SPEECH_LOWPASS_16K) {
+  const keep = taps.length - 1;
+  let history = new Float64Array(keep);
+  let phase = 0;
+  return function decimate(pcm) {
+    if (!Buffer.isBuffer(pcm)) pcm = Buffer.from(pcm);
+    if ((pcm.length & 1) !== 0) throw new Error("PCM S16LE frame must have an even byte length");
+    const length = pcm.length >> 1;
+    const x = new Float64Array(keep + length);
+    x.set(history);
+    for (let i = 0; i < length; i++) x[keep + i] = pcm.readInt16LE(i * 2);
+    const count = length > phase ? Math.ceil((length - phase) / 2) : 0;
+    const out = Buffer.allocUnsafe(count * 2);
+    for (let k = 0; k < count; k++) {
+      const newest = keep + phase + k * 2;
+      let acc = 0;
+      for (let t = 0; t < taps.length; t++) acc += taps[t] * x[newest - t];
+      out.writeInt16LE(clamp16(acc), k * 2);
+    }
+    phase = phase + count * 2 - length;
+    history = x.slice(x.length - keep);
+    return out;
+  };
+}
+
+// Streaming 8 kHz -> 16 kHz S16LE polyphase interpolator. The last input
+// samples of each RTP packet feed the next one, avoiding the 50 Hz seam
+// produced by resampling every 20 ms packet independently.
+export function createInterpolator2x(taps = SPEECH_LOWPASS_16K) {
+  const phases = Math.ceil(taps.length / 2);
+  const even = new Float64Array(phases), odd = new Float64Array(phases);
+  for (let k = 0; k < phases; k++) {
+    even[k] = 2 * (taps[2 * k] || 0);
+    odd[k] = 2 * (taps[2 * k + 1] || 0);
+  }
+  const keep = phases - 1;
+  let history = new Float64Array(keep);
+  return function interpolate(pcm) {
+    if (!Buffer.isBuffer(pcm)) pcm = Buffer.from(pcm);
+    if ((pcm.length & 1) !== 0) throw new Error("PCM S16LE frame must have an even byte length");
+    const length = pcm.length >> 1;
+    const x = new Float64Array(keep + length);
+    x.set(history);
+    for (let i = 0; i < length; i++) x[keep + i] = pcm.readInt16LE(i * 2);
+    const out = Buffer.allocUnsafe(length * 4);
+    for (let n = 0; n < length; n++) {
+      const newest = keep + n;
+      let a = 0, b = 0;
+      for (let k = 0; k < phases; k++) { a += even[k] * x[newest - k]; b += odd[k] * x[newest - k]; }
+      out.writeInt16LE(clamp16(a), n * 4);
+      out.writeInt16LE(clamp16(b), n * 4 + 2);
+    }
+    history = x.slice(x.length - keep);
+    return out;
+  };
+}
+
 export function parseRtpPacket(packet) {
   if (!Buffer.isBuffer(packet)) packet = Buffer.from(packet);
   if (packet.length < RTP_HEADER_BYTES) return null;

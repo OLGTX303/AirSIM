@@ -212,6 +212,28 @@ dashboard may remain Cloudflare-proxied, but `RTP_PUBLIC_HOST` must resolve
 to/refer to a directly reachable VPS/LAN address. Device WSS can still use the
 DNS-only device hostname described above.
 
+### Voice clarity pipeline
+
+Both directions are paced by one monotonic media clock per device. Each
+gateway timer tick sends every 20 ms frame that is due, so late Node/Windows
+timers cannot slow the stream below 50 packets/s. Downlink RTP goes through a
+jitter buffer: 200 ms warm-up, latency capped at 360 ms, loss concealment of
+one silent frame per missing packet, and resync on a new SSRC or sequence jump
+(for example after a device VoIP restart). The 8 <-> 16 kHz conversion uses
+streaming 63-tap low-pass filters, so 20 ms frame boundaries are seamless and
+16 -> 8 kHz decimation does not alias. Uplink is primed with 60 ms of audio
+before speech is sent and fills underruns with PCMU silence to keep RTP timing
+continuous. The browser's microphone decimator and speaker interpolator also
+carry state across audio blocks.
+
+The dashboard's audio-recovery line reports `DL latency trims`,
+`UL underruns`, and `RTP resyncs`. Rising values point to network jitter or
+loss rather than codec distortion.
+
+The Air8000 suppresses ringback (`cc.bridgeTone`) whenever the cellular leg is
+already `CONNECTED`, including when the gateway re-attaches SIP media to a
+live call after a browser reconnect.
+
 No ringback oscillator or generated audio is used. Before answer, the browser
 hears audio only when the cellular network supplies real early media. This
 preserves CRBT/caller tunes and network announcements exactly instead of
