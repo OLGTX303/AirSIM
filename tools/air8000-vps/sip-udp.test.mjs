@@ -24,4 +24,9 @@ const response = parseSip([
 ].join("\r\n"));
 assert.equal(response.code, 183);
 assert.deepEqual(parseSdp("v=0\r\nc=IN IP4 192.168.1.48\r\nm=audio 40000 RTP/AVP 0\r\n"), { address: "192.168.1.48", port: 40000 });
+const sipSource = await import("node:fs").then(fs => fs.readFileSync(new URL("./sip-udp.mjs", import.meta.url), "utf8"));
+assert.match(sipSource,/async resume\(device, session\)/);
+assert.match(sipSource,/X-AirSIM-Resume/);
+assert.match(sipSource,/this\.forget\(device\.device_id\)/);
+
 console.log("Air8000 SIP UDP tests passed");
