@@ -168,3 +168,34 @@ The test scans for the `A8-` device, verifies the AirSIM GATT service, reads
 the serial/IMEI identity, subscribes to status and Wi-Fi notifications, sends
 the real scan request, and reports whether GATT disconnected. It does not send
 Wi-Fi credentials or enrollment tokens.
+
+
+## Real carrier early media over RTP
+
+Firmware that reports the Air8000 CC pure-PCM bridge uses a direct UDP RTP
+media leg in addition to the device WSS control channel. The gateway allocates
+one UDP port per Air8000 from the default range `41000-41063`, sends that
+endpoint to the module as `media.rtp_config`, decodes incoming PCMU RTP to
+S16LE PCM for the browser, and encodes browser microphone PCM back to PCMU RTP.
+
+Set the public/LAN IPv4 that the Air8000 can reach:
+
+```env
+RTP_PUBLIC_HOST=203.0.113.10
+RTP_PORT_BASE=41000
+RTP_PORT_COUNT=64
+```
+
+Allow inbound **UDP 41000-41063** on the host/VPS firewall. Docker Compose
+publishes that range. If the range is changed, update the Compose UDP port
+mapping to the same range.
+
+Cloudflare HTTP/WebSocket proxying does not proxy this RTP UDP leg. The
+dashboard may remain Cloudflare-proxied, but `RTP_PUBLIC_HOST` must resolve
+to/refer to a directly reachable VPS/LAN address. Device WSS can still use the
+DNS-only device hostname described above.
+
+No ringback oscillator or generated audio is used. Before answer, the browser
+hears audio only when the cellular network supplies real early media. This
+preserves CRBT/caller tunes and network announcements exactly instead of
+replacing them with a fake beep.
