@@ -202,7 +202,6 @@ local function emit_event(kind,payload)
     elseif kind=="call.audio_start" and payload and payload.call then
         start_uplink_source(payload.call)
     elseif kind=="call.media" and media_backend=="carrier_rtp" then
-        carrier_rtp:on_cc(payload.event=="play_stop" and "PLAY_STOP" or "PLAY",payload.value,payload.session)
         announce_media(payload.event=="play" and "media.early" or "media.phase")
     end
     if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end
