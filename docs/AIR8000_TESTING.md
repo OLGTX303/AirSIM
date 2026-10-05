@@ -91,3 +91,34 @@ airsim.carrier_rtp carrier_media_play ...
 The old repeating `cc extern source is not start` error belongs to the
 legacy direct-PCM uplink path and should not appear when `carrier_rtp` is the
 selected backend.
+
+
+## Wi-Fi portal telemetry acceptance
+
+1. Provision or connect the Air8000 to Wi-Fi.
+2. Wait until `wlan.ready()` is true. Merely accepting `wlan.connect()` is
+   not considered connected.
+3. The portal Overview and Wi-Fi tabs must show:
+   - state `connected`
+   - actual SSID
+   - non-zero IPv4 address
+   - gateway
+   - BSSID
+   - RSSI when reported by the driver
+4. Disconnect/reconnect Wi-Fi and verify the portal changes through
+   associated/connected/disconnected states without requiring a page reload.
+5. Keeping Web Bluetooth connected must not freeze Overview, GNSS, Calls, SMS,
+   or Wi-Fi telemetry rendering.
+
+## GNSS portal telemetry acceptance
+
+1. Open the GNSS tab and press **Request real GNSS fix**.
+2. The portal must immediately change to `searching`.
+3. On Air8000 `GNSS_STATE=FIXED`, the portal must show WGS84 latitude and
+   longitude plus altitude, satellites and HDOP when available.
+4. `exgnss.open()` returning Lua `nil` is normal and must not be treated as
+   a startup failure.
+5. For a cold start, allow the full 60-second TIMERORSUC window outdoors with a
+   usable GNSS antenna/view of sky.
+6. On loss of fix, the portal must show `lost`; closing the receiver must not
+   erase the last valid coordinates already reported.
