@@ -130,6 +130,45 @@ ok("carrier RTP backend selects native bridge without fake tone", function()
   assert(calls.stop and calls.bridgeStop)
 end)
 
+ok("Wi-Fi telemetry reports actual IP-ready connection", function()
+  local W=require("system.wifi_status")
+  local wlan={
+    ready=function() return true end,
+    getIP=function() return "192.168.1.48" end,
+    getSsid=function() return "LabWiFi" end,
+    getInfo=function() return {bssid="001122AABBCC",rssi=-51,gw="192.168.1.1"} end,
+    getMac=function() return "AABBCCDDEEFF" end,
+  }
+  local cache={}
+  local snap=W.snapshot(wlan,{wifi={ssid="SavedWiFi"}},cache,"IP_READY",nil,100)
+  assert(snap.connected==true and snap.state=="connected")
+  assert(snap.ssid=="LabWiFi" and snap.ip=="192.168.1.48")
+  assert(snap.gateway=="192.168.1.1" and snap.rssi==-51)
+end)
+
+ok("Air8000 exgnss open nil return is success", function()
+  local G=require("gnss.gnss_service")
+  local opened=false
+  local api={
+    TIMERORSUC=2,
+    setup=function(opts) assert(opts.gnssmode==1); return nil end,
+    open=function(mode,opts) opened=true; assert(mode==2 and opts.tag=="airsim"); return nil end,
+    is_fix=function() return true end,
+    rmc=function(mode) assert(mode==2); return {valid=true,lat=1.25,lng=103.75,speed=1,course=90} end,
+    gga=function() return {altitude=12.5,satellites_tracked=8,hdop=0.9,fix_quality=1} end,
+    gsv=function() return {total_sats=14} end,
+    gsa=function() return {pdop=1.2,vdop=1.0,hdop=0.8,fix_type=3} end,
+  }
+  local g=G.new(api,"on_request")
+  local ok,err=g:start()
+  assert(ok==true and err==nil and opened==true and g.state=="searching")
+  local sample=g:sample(123)
+  assert(sample.fix==true and sample.fix_state=="fixed")
+  assert(sample.latitude==1.25 and sample.longitude==103.75)
+  assert(sample.altitude_m==12.5 and sample.satellites==8 and sample.satellites_visible==14)
+  assert(math.abs(sample.speed_mps-0.514444)<0.00001)
+end)
+
 ok("location normalization", function()
   local L=require("gnss.location"); local x=L.normalize({lat=1,lng=2,alt=3},99)
   assert(x.fix and x.latitude==1 and x.altitude_m==3); assert(not L.normalize({},99).fix)
