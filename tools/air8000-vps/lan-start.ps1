@@ -34,12 +34,13 @@ if (Test-Path $deviceConfig) {
   $relayMatch = [regex]::Match($configText, 'relay_url\s*=\s*"[^:]+://([^/:"]+)')
   if ($relayMatch.Success) { $relayHost = $relayMatch.Groups[1].Value }
 }
-if ([string]::IsNullOrWhiteSpace($deviceId)) { throw "air8000/config.lua must contain a real device_id." }
-if ([string]::IsNullOrWhiteSpace($enrollment)) { throw "air8000/config.lua must contain a real enrollment_token." }
+if ([string]::IsNullOrWhiteSpace($deviceId) -or [string]::IsNullOrWhiteSpace($enrollment)) {
+  Write-Warning "air8000/config.lua still has placeholder enrollment settings. The LAN portal will start, but the device cannot auto-enroll until device_id and enrollment_token are filled."
+}
 $env:PORT = [string]$Port
 $env:LAN_MODE = "true"
 $env:ADMIN_TOKEN = $admin
-$env:AUTO_ENROLL_TOKEN = $enrollment
+$env:AUTO_ENROLL_TOKEN = if ([string]::IsNullOrWhiteSpace($enrollment)) { "" } else { $enrollment }
 $env:DEVICE_REGISTRY_JSON = "{}"
 $addresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })
 $ip = $null
