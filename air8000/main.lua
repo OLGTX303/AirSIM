@@ -666,7 +666,7 @@ local function handle_gps_request(message_id)
 
         publish_location({fix=false,fix_state="searching",timestamp=now_ms()})
         local sample
-        for i=1,60 do
+        for i=1,gnss_module.OPEN_SECONDS do
             sample=_G.gnss_service:sample(now_ms())
             if sample and sample.fix then break end
             if i==1 or i%5==0 then publish_location(sample) end
@@ -896,5 +896,27 @@ if sys and sys.subscribe then
 end
 if sys and sys.timerLoopStart then
     sys.timerLoopStart(function() publish_wifi("POLL") end,10000)
+end
+-- The modem usually has no IMEI yet when main.lua reads the identity at boot.
+-- Keep polling until it does, then publish it; registration also carries it
+-- from then on through status.imei.
+if not status.imei and sys and sys.taskInit then
+    sys.taskInit(function()
+        for _=1,180 do
+            local imei=identity.imei(mobile)
+            if imei then
+                status.imei=imei
+                device_identity.imei=imei
+                if log then log.info("airsim.identity","imei_ready","len",#imei) end
+                while not (_G.relay_client and _G.relay_client:send("device.identity",
+                        {imei=imei,serial_number=status.serial_number},now_ms())) do
+                    sys.wait(5000)
+                end
+                return
+            end
+            sys.wait(1000)
+        end
+        if log then log.warn("airsim.identity","imei_unavailable") end
+    end)
 end
 if sys and sys.run then sys.run() end

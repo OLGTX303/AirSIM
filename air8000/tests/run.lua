@@ -259,6 +259,41 @@ ok("Air8000 exgnss open nil return is success", function()
   assert(math.abs(sample.speed_mps-0.514444)<0.00001)
 end)
 
+ok("IMEI is retried until the modem reports a real value", function()
+  package.loaded["cellular.identity"]=nil
+  local I=require("cellular.identity")
+  assert(I.imei({imei=function() return "" end})==nil)
+  assert(I.imei({imei=function() return nil end})==nil)
+  assert(I.imei({imei=function() error("modem not ready") end})==nil)
+  assert(I.imei({imei=function() return "unknown" end})==nil)
+  assert(I.imei({imei=function() return " 866123456789012 \r\n" end})=="866123456789012")
+  local id=I.read({imei=function() return "866123456789012" end},nil,{serial_number="SN1"})
+  assert(id.imei=="866123456789012" and id.serial_number=="SN1")
+  package.loaded["protocol.device"]=nil
+  local st=require("protocol.device").status({},id)
+  assert(st.imei=="866123456789012","status must carry imei for device.register")
+  local fp=assert(io.open("main.lua","r")); local src=fp:read("*a"); fp:close()
+  assert(src:find('identity.imei(mobile)',1,true) and src:find('"device.identity"',1,true))
+  for _,pair in ipairs({{"cellular/identity.lua","cellular.identity.lua"},{"protocol/device.lua","protocol.device.lua"},{"gnss/gnss_service.lua","gnss.gnss_service.lua"}}) do
+    local a=assert(io.open(pair[1],"r")):read("*a"); local b=assert(io.open(pair[2],"r")):read("*a")
+    assert(a==b,"flat LuatTools copy must match "..pair[1])
+  end
+end)
+
+ok("GNSS uses bundled exgnss without AGPS unless lbsLoc2 is present", function()
+  package.loaded["gnss.gnss_service"]=nil
+  local G=require("gnss.gnss_service")
+  local setup_opts,open_opts
+  local api={TIMERORSUC=2,setup=function(o) setup_opts=o end,open=function(_,o) open_opts=o end}
+  local g=G.new(api,"on_request")
+  assert(g:start()==true)
+  assert(setup_opts.agps_enable==false,"lbsLoc2 is not bundled")
+  assert(open_opts.val==120 and G.OPEN_SECONDS==120)
+  local fp=assert(io.open("exgnss.lua","r")); local src=fp:read("*a"); fp:close()
+  assert(src:find("function exgnss.setup",1,true) and src:find("function exgnss.open",1,true))
+  assert(src:find("libgnss.bind",1,true),"exgnss powers and binds the Air8000 GNSS UART")
+end)
+
 ok("location normalization", function()
   local L=require("gnss.location"); local x=L.normalize({lat=1,lng=2,alt=3},99)
   assert(x.fix and x.latitude==1 and x.altitude_m==3); assert(not L.normalize({},99).fix)

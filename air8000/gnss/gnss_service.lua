@@ -14,6 +14,9 @@ local function copy_table(src)
     return out
 end
 
+-- A cold fix without AGPS commonly needs 30-60 s outdoors and more indoors.
+M.OPEN_SECONDS=120
+
 function M.new(api,policy)
     return setmetatable({
         api=api,
@@ -29,9 +32,14 @@ end
 function M:setup()
     if self.configured then return true end
     if self.api and type(self.api.setup)=="function" then
+        -- exgnss AGPS needs lbsLoc2 for a cell-based seed position. The
+        -- AirSIM bundle does not ship it, so only enable AGPS when present;
+        -- otherwise the AGPS task errors before the receiver gets data.
+        local agps=type(package)=="table" and type(package.searchpath)=="function" and
+            package.searchpath("lbsLoc2",package.path or "")~=nil
         local ok=pcall(self.api.setup,{
             gnssmode=1,
-            agps_enable=true,
+            agps_enable=agps==true,
             debug=false,
             hz=1,
         })
@@ -50,7 +58,7 @@ function M:start()
     -- by whether the call itself completed without throwing.
     if type(self.api.open)=="function" then
         local mode=self.api.TIMERORSUC or self.api.DEFAULT
-        local ok,err=pcall(self.api.open,mode,{tag="airsim",val=60})
+        local ok,err=pcall(self.api.open,mode,{tag="airsim",val=M.OPEN_SECONDS})
         if not ok then
             self.state="unavailable"
             return false,"gnss_open_failed:"..tostring(err)

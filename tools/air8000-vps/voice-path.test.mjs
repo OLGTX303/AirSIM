@@ -68,6 +68,10 @@ assert.match(server,/next\.tx_pps=Math\.round/);
 assert.match(server,/stats\.rtp_rx_pps=/);
 assert.match(page,/command\('audio_guard',\{enabled:false\}\)/);
 assert.match(page,/Air8000 bridge rate \(expect 50\/s\)/);
+assert.match(server,/msg\.type === "device\.identity"/);
+assert.match(server,/function publicDevice\(d\) \{[^}]*imei:d\.imei\|\|null/);
+assert.match(server,/\\d\{14,17\}/);
+assert.match(page,/g\.error\?'<br><small>'/);
 
 assert.match(page,/targetLead:0\.36/);
 assert.match(page,/sampleRate\*0\.36/);

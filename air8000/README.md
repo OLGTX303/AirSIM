@@ -43,3 +43,19 @@ The old `carrier_rtp` setting is retained only for compatibility with old
 configuration files. The selector never chooses it on the normal stock
 firmware path. If SIP credentials are unavailable, compatible mode falls back
 to direct PCM and reports that fallback in device status.
+
+## IMEI and GNSS
+
+The modem usually has no IMEI when `main.lua` starts. The app polls
+`mobile.imei()` for up to three minutes, accepts only a 14-17 digit value,
+then sends `device.identity` to the gateway; later registrations carry it in
+`status.imei`. The serial log shows `airsim.identity imei_ready len 15`, or
+`imei_unavailable` when the modem never reports one.
+
+Base firmware 113 does not embed `exgnss`, so the bundle ships the
+unmodified LuatOS `exgnss.lua` (LuatOS `7587d4f110`, MIT). Without it the
+app could only reach `libgnss`, which parses NMEA but cannot power the
+receiver, and every GNSS request ended as `gnss_api_unsupported`. AGPS is
+enabled only when `lbsLoc2` is also bundled; without AGPS a cold first fix
+can take 30-60 s outdoors, so a request keeps the receiver open for 120 s.
+The dashboard shows the receiver error under the GNSS state.
