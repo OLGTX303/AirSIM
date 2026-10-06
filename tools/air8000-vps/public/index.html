@@ -72,7 +72,7 @@ function createVoiceState(){
     ws:null,ctx:null,stream:null,source:null,processor:null,micHighPass:null,micLowPass:null,muteNode:null,
     playNode:null,playModuleUrl:null,useWorklet:false,nextPlay:0,downlinkRate:8000,uplinkRate:8000,
     pending:new Int16Array(0),downlinkPackets:0,playQueue:[],playStarted:false,playUnderruns:0,
-    playDrops:0,workletPending:new Float32Array(0),targetLead:0.20,minLead:0.08,maxLead:0.60,wantActive:false,deviceID:null,
+    playDrops:0,workletPending:new Float32Array(0),targetLead:0.36,minLead:0.20,maxLead:0.80,wantActive:false,deviceID:null,
     reconnectTask:null,reconnectToken:0,lastDownlinkAt:0,mediaConnectedAt:0,watchdog:null,
     socketGeneration:0,ticket:null
   };
@@ -151,7 +151,7 @@ async function setupPlaybackWorklet(){
   if(!voice.ctx?.audioWorklet||typeof AudioWorkletNode==='undefined')return false;
   const source=[
     "class AirSIMPlaybackProcessor extends AudioWorkletProcessor {",
-    " constructor(){super();this.q=[];this.offset=0;this.buffered=0;this.started=false;this.target=Math.round(sampleRate*0.20);this.max=Math.round(sampleRate*0.60);this.underruns=0;this.dropped=0;this.port.onmessage=e=>this.msg(e.data||{});}",
+    " constructor(){super();this.q=[];this.offset=0;this.buffered=0;this.started=false;this.target=Math.round(sampleRate*0.36);this.max=Math.round(sampleRate*0.80);this.underruns=0;this.dropped=0;this.port.onmessage=e=>this.msg(e.data||{});}",
     " msg(m){if(m.type==='reset'){this.q=[];this.offset=0;this.buffered=0;this.started=false;return;}if(m.type!=='pcm'||!m.samples)return;const a=new Float32Array(m.samples);while(this.buffered+a.length>this.max&&this.q.length){const first=this.q.shift();this.buffered-=Math.max(0,first.length-this.offset);this.offset=0;this.dropped++;}this.q.push(a);this.buffered+=a.length;if(!this.started&&this.buffered>=this.target)this.started=true;if((this.dropped&15)===1)this.port.postMessage({type:'drop',count:this.dropped});}",
     " process(inputs,outputs){const out=outputs[0]&&outputs[0][0];if(!out)return true;out.fill(0);if(!this.started)return true;let i=0;while(i<out.length){if(!this.q.length){this.underruns++;this.port.postMessage({type:'underrun',count:this.underruns});break;}const a=this.q[0];const n=Math.min(out.length-i,a.length-this.offset);out.set(a.subarray(this.offset,this.offset+n),i);i+=n;this.offset+=n;this.buffered-=n;if(this.offset>=a.length){this.q.shift();this.offset=0;}}return true;}",
     "}",
