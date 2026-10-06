@@ -19,7 +19,8 @@ function M.probe(env)
             fn(vp,"setAudioMode") and vp.AUDIO_MODE_BRIDGE~=nil and fn(vp,"pcmIn") and fn(vp,"pcmOut") and fn(vp,"start") and fn(vp,"stop") and fn(vp,"on"),
         sip_bridge=present(env.sip),
     }
-    c.real_early_media=c.carrier_rtp_pcm
+    c.stock_firmware_voice_supported=c.direct_pcm or c.sip_bridge
+    c.real_early_media=c.sip_bridge
     c.required_ok=c.voice and c.sms and c.websocket and c.crypto and c.fskv and c.gnss
     return c
 end

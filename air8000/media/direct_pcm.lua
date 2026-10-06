@@ -4,6 +4,8 @@ local RECORD_BUFFER_BYTES = 640
 local MAX_PENDING_MS = 400
 
 local function quality_rate(cc)
+    local forced=tonumber(rawget(_G,"AIRSIM_VOICE_RATE"))
+    if forced==8000 or forced==16000 then return forced end
     if not cc or type(cc.quality) ~= "function" then return 8000 end
     local ok, quality = pcall(cc.quality)
     if not ok then return 8000 end

@@ -6,12 +6,15 @@ return {
     enrollment_token = "REPLACE_WITH_LAN_ENROLLMENT_TOKEN",
     ble_pairing_code = "REPLACE_WITH_6_DIGIT_PAIRING_CODE",
     relay_url = "wss://relay.example.invalid/v1/devices/air8000",
-    media_backend = "auto", -- auto | carrier_rtp | direct_pcm | sip_bridge
-    carrier_rtp = { enabled = true }, -- real carrier early media; endpoint is assigned by the gateway\n    location_policy = "on_request", -- off | on_request | periodic
+    voice_mode = "compatible", -- compatible | wideband; select before a call
+    media_backend = "sip_bridge", -- legacy alias for voice_mode
+    voice_sample_rate = 8000, -- 8000 now; raise to 16000 only after a dedicated test
+    carrier_rtp = { enabled = false }, -- legacy optional path only
+    location_policy = "on_request", -- off | on_request | periodic
     location_period_ms = 60000,
     wifi = { ssid = "REPLACE_WIFI_SSID", password = "REPLACE_WIFI_PASSWORD" },
     limits = { max_message_bytes = 65536, max_sms_body = 4096, nonce_ttl_ms = 300000 },
-    -- Enable only after the VPS has a SIP/UDP endpoint for this device.
+    -- Compatible mode uses the stock exSIP SIP/UDP bridge and PCMU/8 kHz.
     sip = {
         enabled = false,
         sip_server_addr = "192.168.1.91",

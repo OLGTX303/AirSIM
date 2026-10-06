@@ -44,8 +44,8 @@ function clearDial(){const el=document.querySelector('#call-number');if(el){el.v
 function backspaceDial(){const el=document.querySelector('#call-number');if(el){el.value=(el.value||'').slice(0,-1);localStorage.setItem('airsimDialNumber',el.value)}}
 let activeCallState='IDLE';
 async function phoneKey(value,button){if(activeCallState==='CONNECTED'){await callAction('dtmf',{digit:value},button,'Sent')}else dialDigit(value)}
-async function placeCall(button){try{await startVoice();voiceStatus('Carrier media armed — dialing…');await callAction('dial',{number:document.querySelector('#call-number')?.value||''},button,'Call')}catch(e){voiceStatus('Audio unavailable: '+e.message)}}
-async function answerIncoming(button){if(button?.disabled)return;const old=button?.textContent||'Answer and start audio';if(button){button.disabled=true;button.textContent='Starting audio…'}try{await startVoice();await command('answer');voiceStatus('Incoming call answered; carrier audio connected');if(button)button.textContent='Answered'}catch(e){voiceStatus('Answer/audio error: '+e.message);if(button)button.textContent='Failed'}setTimeout(()=>{if(button){button.disabled=false;button.textContent=old}},1800)}
+async function placeCall(button){try{const d=current();await startVoice();if(d?.voice_mode==='wideband')startLocalRingback();voiceStatus('Carrier media armed — dialing…');await callAction('dial',{number:document.querySelector('#call-number')?.value||''},button,'Call')}catch(e){voiceStatus('Audio unavailable: '+e.message)}}
+async function answerIncoming(button){if(button?.disabled)return;const old=button?.textContent||'Answer and start audio';if(button){button.disabled=true;button.textContent='Starting audio…'}try{await startVoice();stopLocalRingback();await command('answer');voiceStatus('Incoming call answered; carrier audio connected');if(button)button.textContent='Answered'}catch(e){voiceStatus('Answer/audio error: '+e.message);if(button)button.textContent='Failed'}setTimeout(()=>{if(button){button.disabled=false;button.textContent=old}},1800)}
 function fmtNumber(value,digits=1){const n=Number(value);return Number.isFinite(n)?n.toFixed(digits):'-'}
 function fmtCoord(value){const n=Number(value);return Number.isFinite(n)?n.toFixed(7):'-'}
 function render(){const d=current();if(!d){['overview','calls','sms','gps'].forEach(id=>document.querySelector('#'+id).innerHTML='<p>No authenticated Air8000 connected.</p>');document.querySelector('#wifi').innerHTML=`<div class="card"><h2>BLE first-time provisioning</h2><p class="muted">No LAN device is required for first-time setup. Connect to the Air8000 over BLE, scan Wi-Fi, then send credentials.</p><div class="grid"><div class="field"><label>BLE pairing code</label><input id="ble-pairing" value="000000" maxlength="6"></div><div class="field"><label>SSID</label><input id="wifi-ssid"></div><div class="field"><label>Password</label><input id="wifi-password" type="password"></div><div class="field"><label>BSSID (optional)</label><input id="wifi-bssid" placeholder="001122AABBCC"></div><div class="field"><label>Security</label><select id="wifi-security"><option>auto</option><option>wpa2</option><option>wpa2/wpa3</option><option>wpa3</option></select></div></div><button onclick="bleConnect()">Detect Air8000 over BLE</button><button onclick="bleScan()">Scan Wi-Fi networks</button><button onclick="bleConnectWifi()">Send Wi-Fi over BLE</button><div id="ble-status" class="status">BLE not connected</div><pre id="ble-networks"></pre></div>`;return}const w=d.wifi||{};const g=d.location||{};
@@ -87,12 +87,13 @@ async function refresh(){
     else if(wanted&&devices.some(d=>d.device_id===wanted))select.value=wanted;
     // Avoid rebuilding the phone panel every second during an active call.
     // Media events update voice status directly; render again when audio stops.
-    if(!voice.wantActive)render();
+    if(!voice.wantActive){render();showVoiceMode()}
   }catch(e){
     if(!voice.wantActive)write(e.message);
   }
 }
 function voiceStatus(text){voiceStatusText=text;const el=document.querySelector('#voice-status');if(el)el.textContent=text}
+function showVoiceMode(){const d=current(),host=document.querySelector('#overview .card');if(!d||!host)return;const box=document.createElement('div');box.className='status';box.style.marginTop='10px';const mode=d.voice_mode||((d.media_backend==='sip_bridge')?'compatible':(d.media_backend==='direct_pcm'?'wideband':'unknown'));box.innerHTML='<b>Voice mode</b><br><select disabled><option>'+esc(mode)+'</option></select> '+(mode==='compatible'?'SIP bridge · carrier early media · PCMU 8 kHz':'Direct PCM · starts after connect · '+(d.media_rate||8000)+' Hz');host.appendChild(box)}
 function applyVoiceRate(downlink,uplink){
   voice.downlinkRate=Number(downlink)===16000?16000:8000;
   voice.uplinkRate=Number(uplink)===16000?16000:8000;
@@ -318,6 +319,19 @@ function scheduleMediaReconnect(reason){
     if(voice.wantActive&&token===voice.reconnectToken)voiceStatus('Voice recovery timed out — call is still active; press audio/call again to retry');
   })().finally(()=>{if(token===voice.reconnectToken)voice.reconnectTask=null});
 }
+function startLocalRingback(){
+  if(voice.ringbackTimer||!voice.ctx)return;
+  const osc=voice.ctx.createOscillator(),gain=voice.ctx.createGain();
+  osc.type='sine';osc.frequency.value=440;gain.gain.value=0;osc.connect(gain);gain.connect(voice.ctx.destination);osc.start();
+  let on=false;const tick=()=>{on=!on;gain.gain.setTargetAtTime(on?0.035:0,voice.ctx.currentTime,0.015)};
+  tick();voice.ringbackOsc=osc;voice.ringbackGain=gain;voice.ringbackTimer=setInterval(tick,2000);
+}
+function stopLocalRingback(){
+  if(voice.ringbackTimer)clearInterval(voice.ringbackTimer);voice.ringbackTimer=null;
+  if(voice.ringbackGain&&voice.ctx)voice.ringbackGain.gain.setTargetAtTime(0,voice.ctx.currentTime,0.01);
+  if(voice.ringbackOsc)try{voice.ringbackOsc.stop(voice.ctx.currentTime+0.03)}catch{};
+  voice.ringbackOsc=null;voice.ringbackGain=null;
+}
 function startVoiceWatchdog(){
   if(voice.watchdog)clearInterval(voice.watchdog);
   voice.watchdog=setInterval(()=>{
@@ -379,6 +393,7 @@ async function startVoice(){
 }
 async function stopVoice(){
   const old=voice;
+  stopLocalRingback();
   old.wantActive=false;
   old.reconnectToken++;
   old.socketGeneration++;

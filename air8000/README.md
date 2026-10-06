@@ -26,25 +26,20 @@ audio path and antenna. The repository tests only exercise bounded in-memory
 logic and mocks; they do not prove carrier or hardware behavior.
 
 
-## Real carrier early media
+## Stock firmware voice modes
 
-When the installed Air8000 firmware exposes `cc.AUDIO_MODE_BRIDGE_PCM`,
-`cc.bridgePcmStats()`, `cc.bridgeAudioStop()`, and the VoIP bridge API,
-`media_backend = "auto"` selects `carrier_rtp` before the first
-`cc.init()`. This is required because the CC audio backend is fixed after a
-successful initialization until reboot.
+The device selects one mode before a call and never switches media backends
+mid-call:
 
-The carrier backend intentionally does **not** call `cc.bridgeTone()` and the
-web UI does not synthesize a ringback tone. Audio heard before answer therefore
-comes from the cellular network/CC PCM path: carrier early media, CRBT/caller
-tunes, announcements, congestion/busy audio, or other real network media.
+- `voice_mode = "compatible"` uses the stock `exsip` SIP bridge with PCMU,
+  mono, 8 kHz, 20 ms. It preserves real carrier early media and uses the
+  gateway's SIP/UDP endpoint.
+- `voice_mode = "wideband"` uses stock `direct_pcm` after the call connects,
+  with the rate reported by `cc.quality()` (8 kHz or 16 kHz). The browser
+  supplies local ringback until the carrier connects; this mode cannot claim
+  real pre-answer carrier media.
 
-The native CC bridge is connected to `voip.AUDIO_MODE_BRIDGE` using PCMU,
-8 kHz, mono, 20 ms RTP. The VPS/LAN gateway converts that RTP to S16LE PCM for
-the authenticated browser media WebSocket and converts browser microphone PCM
-back to PCMU RTP. Cellular 16 kHz calls are resampled by the native bridge to
-the 8 kHz RTP side, matching the current AirSIM iPhone/debug-web PCM path.
-
-If the firmware does not expose the pure PCM bridge, auto mode falls back to
-the post-answer `direct_pcm` backend. That fallback cannot claim real
-pre-answer carrier media.
+The old `carrier_rtp` setting is retained only for compatibility with old
+configuration files. The selector never chooses it on the normal stock
+firmware path. If SIP credentials are unavailable, compatible mode falls back
+to direct PCM and reports that fallback in device status.

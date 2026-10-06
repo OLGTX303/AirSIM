@@ -51,7 +51,7 @@ function sameSecret(a, b) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, imei:d.imei, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, media_backend:d.media_backend || d.status?.media_backend || null, media_phase:d.media_phase || d.status?.media_phase || "IDLE", media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="carrier_rtp" || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), media_recovery_count:d.media_recovery_count||0, server_instance_id:SERVER_INSTANCE_ID, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, voice_mode:d.voice_mode || d.status?.voice_mode || null, stock_firmware_voice_supported:!!(d.status?.stock_firmware_voice_supported || d.capabilities?.stock_firmware_voice_supported), media_backend:d.media_backend || d.status?.media_backend || null, media_phase:d.media_phase || d.status?.media_phase || "IDLE", media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), media_recovery_count:d.media_recovery_count||0, server_instance_id:SERVER_INSTANCE_ID, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
 function emptyMediaStats() {
@@ -595,17 +595,17 @@ const server=http.createServer(async (req,res)=>{
       const ticket=issueMediaTicket(id);
       const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0];
       const direct=nativePcmEnabled(d);
-      const browserRate=direct ? (d.media_rate||8000) : (rtpMediaEnabled(d)?16000:(d.media_rate||8000));
+      const browserRate=direct ? (d.media_rate||8000) : 8000;
       return json(res,201,{
         expires_in:60,
         sample_rate:browserRate,
         downlink_sample_rate:browserRate,
-        // SIP/RTP remains PCMU/8000. The browser leg is PCM16/16000;
-        // server-side resampling keeps both media contracts explicit.
+        // Compatible SIP bridge is PCMU/8000 end to end. Wideband direct
+        // PCM advertises its selected rate through media.open later.
         uplink_sample_rate:browserRate,
         browser_sample_rate:browserRate,
         transport:direct?"direct_pcm":rtpMediaEnabled(d)?(carrierRtpEnabled(d)?"carrier_rtp":"sip_rtp"):"websocket_pcm",
-        real_early_media:carrierRtpEnabled(d) || sipBridgeEnabled(d),
+        real_early_media:sipBridgeEnabled(d),
         ws_url:`${proto==="https"?"wss":"ws"}://${req.headers.host}/media?ticket=${encodeURIComponent(ticket)}`
       });
     }
@@ -733,13 +733,14 @@ mediaWss.on("connection",(ws,deviceID)=>{
           firmware: identity.firmware,
           capabilities: identity.capabilities,
           status: identity.status || {},
+          voice_mode: identity.status?.voice_mode || null,
           location: identity.status?.location || null,
           wifi: identity.status?.wifi || null,
           media_backend: identity.status?.media_backend || null,
           media_phase: identity.status?.media_phase || "IDLE",
           media_transport: identity.status?.media_transport || (identity.status?.media_backend === "carrier_rtp" ? "carrier_rtp" : identity.status?.media_backend === "sip_bridge" ? "sip_rtp" : "websocket_pcm"),
-          media_rate: 8000,
-          media_uplink_rate: identity.status?.media_backend === "carrier_rtp" || identity.status?.media_backend === "sip_bridge" ? 8000 : 16000,
+          media_rate: Number(identity.status?.media_rate) || 8000,
+          media_uplink_rate: Number(identity.status?.media_uplink_rate) || 8000,
           media_stats: emptyMediaStats(),
           rtp_ready: false,
           events: [],
@@ -764,6 +765,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
       }
       if (msg.type === "device.status" || msg.type === "event.status") {
         device.status=msg.payload || msg.status || {};
+        device.voice_mode=device.status.voice_mode || device.voice_mode;
         if(device.status.location)device.location=device.status.location;
         if(device.status.wifi)device.wifi=device.status.wifi;
       }
@@ -774,7 +776,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
       if (msg.type === "device.command_result" && msg.payload?.payload?.fix_state) device.location = msg.payload.payload;
       if (msg.type === "media.open" || msg.type === "media.ready" || msg.type === "media.early") {
         device.media_rate=Number(msg.payload?.downlink_sample_rate || msg.payload?.sample_rate) || 8000;
-        device.media_uplink_rate=Number(msg.payload?.uplink_sample_rate) || (rtpMediaEnabled(device)?8000:16000);
+        device.media_uplink_rate=Number(msg.payload?.uplink_sample_rate) || device.media_rate;
         if(msg.payload?.backend)device.media_backend=msg.payload.backend;
         if(msg.payload?.transport)device.media_transport=msg.payload.transport;
         if(Number(msg.payload?.cellular_sample_rate)>0){
