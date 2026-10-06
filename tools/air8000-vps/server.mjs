@@ -297,24 +297,6 @@ async function ensureRtpSession(deviceID) {
     if(delta>0)stats.rtp_reordered_packets++;
 
     const device=devices.get(deviceID);
-    if(device && sipBridgeEnabled(device)){
-      // Let the browser AudioWorklet own the playout clock. The reference
-      // gateway uses the same single-producer/single-consumer model: RTP
-      // arrival only fills the audio queue; Windows timers must not retime
-      // every 20 ms block before it reaches the real-time audio clock.
-      session.rxExpected=(parsed.sequence+1)&0xffff;
-      session.rxStarted=true;
-      const pcm=smoothPcmBoundary(session.lastPcm8,decodePcmuPayload(parsed.payload));
-      session.lastPcm8=pcm;
-      stats.downlink_frames++;
-      stats.downlink_bytes+=pcm.length;
-      updatePcmMetrics(stats,"downlink",pcm);
-      stats.last_activity=Date.now();
-      const peer=mediaPeers.get(deviceID);
-      if(peer?.readyState===1)peer.send(pcm,{binary:true});
-      else stats.dropped_downlink_frames++;
-      return;
-    }
     session.rxQueue.set(parsed.sequence,parsed.payload);
     if(!session.rxStarted && session.rxQueue.size>=session.rxWarmupFrames)session.rxStarted=true;
     if(device){
@@ -421,8 +403,7 @@ function pumpCarrierMedia(session) {
   // A burst is technically lossless but sounds like jumping/stuttering in the
   // browser. The jitter queue trims stale frames; the playout clock remains
   // continuous at one 20 ms frame per tick.
-  const device=devices.get(session.device_id);
-  if(!sipBridgeEnabled(device) && mediaFramesDue(session,"rxClock")>0)playoutCarrierDownlink(session);
+  if(mediaFramesDue(session,"rxClock")>0)playoutCarrierDownlink(session);
   if(mediaFramesDue(session,"txClock")>0)flushCarrierUplink(session);
 }
 function lowestQueuedSequence(session) {
@@ -472,7 +453,7 @@ function playoutCarrierDownlink(session) {
     session.rxQueue.delete(session.rxExpected);
     session.rxMissingSince=0;
     session.rxGapOpen=false;
-    pcm8=decodePcmuPayload(payload);
+    pcm8=smoothPcmBoundary(session.lastPcm8,decodePcmuPayload(payload));
     session.lastPcm8=pcm8;
     session.concealFrames=0;
   }else if(session.rxQueue.size===0){
