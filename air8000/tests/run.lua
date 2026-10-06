@@ -154,8 +154,8 @@ ok("SIP bridge uses official ringback and reports negotiated VoLTE rate", functi
 end)
 
 ok("CC downlink guard enables firmware-safe recording for the SIP bridge", function()
-  package.loaded["media.cc_downlink_guard"]=nil
-  local G=require("media.cc_downlink_guard")
+  package.loaded["media.ccguard"]=nil
+  local G=require("media.ccguard")
   local created,args={},nil
   local zb={create=function(size,fill) local b={size=size,fill=fill}; created[#created+1]=b; return b end}
   local cc={record=function(...) args={...}; return true end}
@@ -168,12 +168,25 @@ ok("CC downlink guard enables firmware-safe recording for the SIP bridge", funct
   assert(select(2,G.enable({record=function() return false end},zb))=="cc_record_failed")
   local fp=assert(io.open("main.lua","r")); local src=fp:read("*a"); fp:close()
   local init=assert(src:find('pcall(cc.init,0)',1,true))
-  local guard=assert(src:find('cc_downlink_guard.enable(cc,zbuff)',1,true))
+  local guard=assert(src:find('ccguard.enable(cc,zbuff)',1,true))
   local start=assert(src:find('pcall(exsip.start)',1,true))
   assert(init<guard and guard<start)
-  local a=assert(io.open("media/cc_downlink_guard.lua","r")):read("*a")
-  local b=assert(io.open("media.cc_downlink_guard.lua","r")):read("*a")
+  local a=assert(io.open("media/ccguard.lua","r")):read("*a")
+  local b=assert(io.open("media.ccguard.lua","r")):read("*a")
   assert(a==b,"flat LuatTools copy must match")
+end)
+
+ok("bundle file names fit the LuatOS 24-byte limit", function()
+  local pipe=io.popen and io.popen('find . -type f -not -path "./tests/*" -not -path "./tools/*" -not -name "*.md"')
+  if not pipe then return end
+  local count=0
+  for path in pipe:lines() do
+    local name=path:match("([^/]+)$")
+    assert(#name<=24, "file name too long for luadb: "..name.." ("..#name.." bytes)")
+    count=count+1
+  end
+  pipe:close()
+  assert(count>0)
 end)
 
 ok("SIP media resume never mixes ringback into a connected call", function()

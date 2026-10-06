@@ -243,7 +243,7 @@ CC<->SIP bridge behaviours affect smoothness:
   callback drains at most two 20 ms frames into RTP and then calls
   `luat_fifo_delete_all(play_save_fifo)`. It loses the whole block when the
   drain timer holds the lock, so the remote voice jumps. The Air8000 app turns
-  on `cc.record()` in SIP-bridge mode (`media/cc_downlink_guard.lua`); the
+  on `cc.record()` in SIP-bridge mode (`media/ccguard.lua`); the
   bridge then leaves that FIFO to the 20 ms drain timer, which never deletes
   audio. Check the boot log for `airsim.media cc_downlink_guard true`.
 - **SIP -> cellular:** RTP goes into a 200 ms arrival-order ring with no
