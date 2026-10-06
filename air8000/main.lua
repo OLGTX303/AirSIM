@@ -16,6 +16,7 @@ local pcm_module=require("media.direct_pcm")
 local carrier_rtp_module=require("media.carrier_rtp")
 local media_manager=require("media.media_manager")
 local media_phase_module=require("media.phase")
+local cc_downlink_guard=require("media.cc_downlink_guard")
 local exsip=nil
 do
     local ok,module=pcall(require,"exsip")
@@ -258,6 +259,11 @@ local function init_cc_backend()
             local init_ok,init_result=pcall(cc.init,0)
             if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
             if not init_ok or init_result==false then return false,"cc_init_failed" end
+            -- Base firmware 113 discards CC downlink audio after each block
+            -- unless call recording is on; see media/cc_downlink_guard.lua.
+            local guard_ok,guard_err=cc_downlink_guard.enable(cc,zbuff)
+            status.cc_downlink_guard=guard_ok==true
+            if log then log.info("airsim.media","cc_downlink_guard",tostring(guard_ok),tostring(guard_err or "")) end
             local start_ok,start_result=pcall(exsip.start)
             if log then log.info("airsim.sip","start",tostring(start_ok and start_result)) end
             if not start_ok or start_result==false then return false,"exsip_start_failed" end

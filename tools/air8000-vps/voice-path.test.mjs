@@ -58,6 +58,10 @@ assert.match(server,/resetCarrierUplink\(session\)/);
 assert.match(server,/Do not\s+\/\/ queue pre-call audio/);
 assert.match(server,/if\(!session \|\| !session\.remote\)return !!session/);
 assert.match(server,/const endpointChanged\s*=\s*!session\.remote/);
+assert.match(server,/DEVICE_RING_CUSHION_FRAMES = 3/);
+assert.match(server,/msg\.type === "call\.audio_start" && sipBridgeEnabled\(device\)/);
+assert.match(server,/if\(!session\.uplinkActive\)session\.txCushionFrames=DEVICE_RING_CUSHION_FRAMES/);
+assert.match(server,/uplink_cushion_frames/);
 
 assert.match(page,/targetLead:0\.36/);
 assert.match(page,/sampleRate\*0\.36/);

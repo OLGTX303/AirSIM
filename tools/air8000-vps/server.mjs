@@ -58,6 +58,11 @@ function concealPcm16(previous, frameIndex) {
   }
   return out;
 }
+// Air8000 base firmware 113 feeds SIP RTP to the cellular leg from an
+// arrival-order ring with no prebuffer; a 20 ms timer zero-fills when it is
+// empty, and the ring is flushed when the call connects. A 60 ms silence
+// cushion (ring capacity is 200 ms) absorbs Wi-Fi jitter from the start.
+const DEVICE_RING_CUSHION_FRAMES = 3;
 
 function sameSecret(a, b) {
   const left = Buffer.from(String(a || "")); const right = Buffer.from(String(b || ""));
@@ -79,7 +84,7 @@ function emptyMediaStats() {
     dropped_downlink_frames:0,rtp_rx_packets:0,rtp_tx_packets:0,rtp_tx_errors:0,
     rtp_lost_packets:0,rtp_late_packets:0,rtp_duplicate_packets:0,
     rtp_reordered_packets:0,rtp_jitter_ms:0,audio_concealment_frames:0,rtp_idle_frames:0,
-    rtp_stream_resets:0,rtp_latency_trim_frames:0,uplink_underrun_frames:0,
+    rtp_stream_resets:0,rtp_latency_trim_frames:0,uplink_underrun_frames:0,uplink_cushion_frames:0,
     uplink_dropped_frames:0,last_activity:Date.now(),
     downlink_peak:0,downlink_rms:0,downlink_silent_frames:0,downlink_clipped_frames:0,
     uplink_peak:0,uplink_rms:0,uplink_silent_frames:0,uplink_clipped_frames:0
@@ -200,6 +205,7 @@ async function ensureRtpSession(deviceID) {
     txStarted:false,
     txPrimed:false,
     txPrimeFrames:3,
+    txCushionFrames:0,
     uplinkActive:false,
     pendingUplink:Buffer.alloc(0),
     // Streaming resamplers keep filter history across 20 ms frames.
@@ -373,6 +379,7 @@ function resetRtpSession(session) {
   session.clockStart=performance.now();
   session.rxClock=0;
   session.txClock=0;
+  session.txCushionFrames=0;
   session.remote=null;
   session.tx=randomRtpState(crypto.randomBytes);
   session.txStarted=false;
@@ -517,6 +524,14 @@ function flushCarrierUplink(session) {
     session.txPrimed=false;
     stats.uplink_underrun_frames++;
   }
+  while(session.txCushionFrames>0){
+    session.txCushionFrames--;
+    const cushion=buildRtpPacket(encodePcmuFrame(SILENT_PCMU_FRAME),session.tx,0,!session.txStarted);
+    session.txStarted=true;
+    session.socket.send(cushion,session.remote.port,session.remote.address,err=>{if(err)stats.rtp_tx_errors++});
+    stats.rtp_tx_packets++;
+    stats.uplink_cushion_frames++;
+  }
   const encoded=encodePcmuFrame(pcm);
   const packet=buildRtpPacket(encoded,session.tx,0,!session.txStarted);
   session.txStarted=true;
@@ -540,6 +555,7 @@ function sendPcmToCarrier(deviceID,raw) {
   const device=devices.get(deviceID);
   const input=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
   const data=sipBridgeEnabled(device) ? input : session.downsample(input);
+  if(!session.uplinkActive)session.txCushionFrames=DEVICE_RING_CUSHION_FRAMES;
   session.uplinkActive=true;
   if(data.length===0)return true;
   session.pendingUplink=Buffer.concat([session.pendingUplink,data]);
@@ -862,6 +878,12 @@ mediaWss.on("connection",(ws,deviceID)=>{
           device.voice_codec=msg.payload?.voice_codec || (device.wideband_volte?"AMR-WB":"AMR-NB");
           device.status={...(device.status||{}),cellular_voice_rate:rate,wideband_volte:device.wideband_volte,voice_codec:device.voice_codec};
         }
+      }
+      if (msg.type === "call.audio_start" && sipBridgeEnabled(device)) {
+        // The firmware flushes its SIP->cellular ring at audio start, before
+        // this event is sent. Re-establish the jitter cushion.
+        const session=rtpSessions.get(device.device_id);
+        if(session)session.txCushionFrames=DEVICE_RING_CUSHION_FRAMES;
       }
       if (msg.type === "media.rtp_config.ack") device.rtp_ready = msg.payload?.ok === true;
       if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase", "media.voice_quality", "media.transport_change"].includes(msg.type)) {

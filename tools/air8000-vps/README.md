@@ -234,6 +234,24 @@ The Air8000 suppresses ringback (`cc.bridgeTone`) whenever the cellular leg is
 already `CONNECTED`, including when the gateway re-attaches SIP media to a
 live call after a browser reconnect.
 
+### Air8000 base firmware 113 audio notes
+
+`LuatOS-SoC_V2052_Air8000_113` is built from LuatOS `7587d4f110`. Two of its
+CC<->SIP bridge behaviours affect smoothness:
+
+- **Remote party -> SIP:** when CC call recording is off, the CC audio
+  callback drains at most two 20 ms frames into RTP and then calls
+  `luat_fifo_delete_all(play_save_fifo)`. It loses the whole block when the
+  drain timer holds the lock, so the remote voice jumps. The Air8000 app turns
+  on `cc.record()` in SIP-bridge mode (`media/cc_downlink_guard.lua`); the
+  bridge then leaves that FIFO to the 20 ms drain timer, which never deletes
+  audio. Check the boot log for `airsim.media cc_downlink_guard true`.
+- **SIP -> cellular:** RTP goes into a 200 ms arrival-order ring with no
+  prebuffer, and a 20 ms timer zero-fills it when empty. The ring is flushed
+  when the call connects. The gateway sends a 60 ms silence cushion on
+  `call.audio_start` and when browser audio (re)starts, shown as
+  `device cushion` in the dashboard.
+
 No ringback oscillator or generated audio is used. Before answer, the browser
 hears audio only when the cellular network supplies real early media. This
 preserves CRBT/caller tunes and network announcements exactly instead of

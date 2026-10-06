@@ -153,12 +153,36 @@ ok("SIP bridge uses official ringback and reports negotiated VoLTE rate", functi
   assert(src:find('wideband_volte',1,true))
 end)
 
+ok("CC downlink guard enables firmware-safe recording for the SIP bridge", function()
+  package.loaded["media.cc_downlink_guard"]=nil
+  local G=require("media.cc_downlink_guard")
+  local created,args={},nil
+  local zb={create=function(size,fill) local b={size=size,fill=fill}; created[#created+1]=b; return b end}
+  local cc={record=function(...) args={...}; return true end}
+  local ok,err=G.enable(cc,zb)
+  assert(ok==true and err==nil)
+  assert(args[1]==true and args[2]==created[1] and args[3]==created[2] and args[4]==created[3] and args[5]==created[4])
+  assert(created[1].size==6400 and created[3].size==640)
+  assert(G.buffers[1]==created[1])
+  assert(select(2,G.enable({},zb))=="cc_record_unavailable")
+  assert(select(2,G.enable({record=function() return false end},zb))=="cc_record_failed")
+  local fp=assert(io.open("main.lua","r")); local src=fp:read("*a"); fp:close()
+  local init=assert(src:find('pcall(cc.init,0)',1,true))
+  local guard=assert(src:find('cc_downlink_guard.enable(cc,zbuff)',1,true))
+  local start=assert(src:find('pcall(exsip.start)',1,true))
+  assert(init<guard and guard<start)
+  local a=assert(io.open("media/cc_downlink_guard.lua","r")):read("*a")
+  local b=assert(io.open("media.cc_downlink_guard.lua","r")):read("*a")
+  assert(a==b,"flat LuatTools copy must match")
+end)
+
 ok("SIP media resume never mixes ringback into a connected call", function()
   local fp=assert(io.open("main.lua","r"))
   local src=fp:read("*a")
   fp:close()
   local ready=assert(src:find('event_type=="media" and action=="ready"',1,true))
-  local block=src:sub(ready,ready+600)
+  local stop=assert(src:find('elseif event_type==',ready+1,true))
+  local block=src:sub(ready,stop)
   assert(block:find('~="CONNECTED"',1,true))
   assert(block:find('sip_media_ready_connected',1,true))
   assert(src:find('sip_resume_connected',1,true))
