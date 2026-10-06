@@ -50,6 +50,9 @@ assert.match(server,/uplink_underrun_frames/);
 assert.match(server,/const keep=PCMU_FRAME_BYTES\*4/);
 assert.match(server,/releaseRtpMedia\(event\.device_id\)/);
 assert.match(server,/resetCarrierUplink\(session\)/);
+assert.match(server,/Do not\s+\/\/ queue pre-call audio/);
+assert.match(server,/if\(!session \|\| !session\.remote\)return !!session/);
+assert.match(server,/const endpointChanged\s*=\s*!session\.remote/);
 
 assert.match(page,/targetLead:0\.36/);
 assert.match(page,/sampleRate\*0\.36/);

@@ -309,6 +309,8 @@ const sipServer = new SipUdpServer({
   onMedia(event) {
     const session = event.session;
     if (!session || !event.device_id) return;
+    const endpointChanged = !session.remote || session.remote.address !== event.remote.address || session.remote.port !== event.remote.port;
+    if (endpointChanged) resetCarrierUplink(session);
     session.remote = event.remote;
     const device = devices.get(event.device_id);
     if (device) {
@@ -518,7 +520,10 @@ function flushCarrierUplink(session) {
 }
 function sendPcmToCarrier(deviceID,raw) {
   const session=rtpSessions.get(deviceID);
-  if(!session)return false;
+  // The browser opens its microphone before SIP has negotiated RTP. Do not
+  // queue pre-call audio: it becomes stale speech and later overflows the
+  // uplink queue when the carrier endpoint appears.
+  if(!session || !session.remote)return !!session;
   const device=devices.get(deviceID);
   const input=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
   const data=sipBridgeEnabled(device) ? input : session.downsample(input);
