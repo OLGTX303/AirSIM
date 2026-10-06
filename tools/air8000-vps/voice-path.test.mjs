@@ -16,6 +16,8 @@ assert.match(server,/const pcm=sipBridgeEnabled\(device\) \? pcm8 : session\.ups
 assert.match(server,/const data=sipBridgeEnabled\(device\) \? input : session\.downsample\(input\)/);
 assert.match(server,/Let the browser AudioWorklet own the playout clock/);
 assert.match(server,/if\(!sipBridgeEnabled\(device\) && mediaFramesDue\(session,"rxClock"\)>0\)/);
+assert.match(server,/function smoothPcmBoundary\(previous, current\)/);
+assert.match(server,/const samples=16/);
 assert.doesNotMatch(server,/resamplePcm16/);
 assert.match(server,/fade the held/);
 assert.match(server,/const heldFrames=Math\.floor/);

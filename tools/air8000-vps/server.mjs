@@ -36,6 +36,19 @@ const MEDIA_FRAME_MS = 20;
 const MEDIA_MAX_CATCHUP_FRAMES = 5;
 const PCMU_FRAME_BYTES = 320; // 160 S16LE samples at 8 kHz
 const SILENT_PCMU_FRAME = Buffer.alloc(PCMU_FRAME_BYTES);
+function smoothPcmBoundary(previous, current) {
+  if (!previous || previous.length !== PCMU_FRAME_BYTES || current.length !== PCMU_FRAME_BYTES) return current;
+  const out=Buffer.from(current);
+  const samples=16; // 2 ms at 8 kHz; enough to remove frame-edge clicks
+  const start=previous.length-(samples*2);
+  for(let i=0;i<samples;i++){
+    const a=(i+1)/(samples+1);
+    const before=previous.readInt16LE(start+(i*2));
+    const now=current.readInt16LE(i*2);
+    out.writeInt16LE(Math.round(before*(1-a)+now*a),i*2);
+  }
+  return out;
+}
 function concealPcm16(previous, frameIndex) {
   if (!previous || previous.length!==PCMU_FRAME_BYTES) return SILENT_PCMU_FRAME;
   const gain=Math.max(0,1-(frameIndex/5));
@@ -291,7 +304,7 @@ async function ensureRtpSession(deviceID) {
       // every 20 ms block before it reaches the real-time audio clock.
       session.rxExpected=(parsed.sequence+1)&0xffff;
       session.rxStarted=true;
-      const pcm=decodePcmuPayload(parsed.payload);
+      const pcm=smoothPcmBoundary(session.lastPcm8,decodePcmuPayload(parsed.payload));
       session.lastPcm8=pcm;
       stats.downlink_frames++;
       stats.downlink_bytes+=pcm.length;
