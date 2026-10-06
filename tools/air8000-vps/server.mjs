@@ -451,13 +451,13 @@ function playoutCarrierDownlink(session) {
     stats.rtp_idle_frames++;
     advanceSequence=false;
   }else{
-    // Do not repeat carrier audio: give a late packet a short chance to arrive
-    // before declaring loss. Once a gap is proven, every remaining missing
-    // sequence in that gap is concealed on its own tick without a new grace
-    // wait, so one lost packet costs one 20 ms frame rather than several.
+    // Give a reordered packet a short chance to arrive, but fade the held
+    // frame during that wait. Repeating the exact previous 20 ms block is
+    // audible as a jump even when the packet arrives before the late counter.
     if(!session.rxMissingSince)session.rxMissingSince=now;
     const declared=session.rxGapOpen || now-session.rxMissingSince>=session.rxMissingGraceMs;
-    pcm8=declared?concealPcm16(session.lastPcm8,session.concealFrames):session.lastPcm8 || SILENT_PCMU_FRAME;
+    const heldFrames=Math.floor((now-session.rxMissingSince)/MEDIA_FRAME_MS);
+    pcm8=concealPcm16(session.lastPcm8,declared?session.concealFrames:Math.min(heldFrames,5));
     if(declared){
       stats.rtp_lost_packets++;
       stats.audio_concealment_frames++;
