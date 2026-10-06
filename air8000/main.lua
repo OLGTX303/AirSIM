@@ -50,7 +50,7 @@ if cfg.voice_mode~="compatible" and cfg.voice_mode~="wideband" then
 end
 -- A compatible device may use SIP as soon as valid credentials are present,
 -- even when an older persisted config left sip.enabled=false.
-if cfg.voice_mode=="compatible" and sip_credentials then sip_cfg.enabled=true end
+if cfg.voice_mode=="compatible" and exsip then sip_cfg.enabled=true end
 local requested_media_backend=cfg.voice_mode=="wideband" and "direct_pcm" or "sip_bridge"
 local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsip,audio_v2=audio_v2,voip=voip})
 local media_backend=media_manager.select(requested_media_backend,caps,sip_cfg.enabled==true)
