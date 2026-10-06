@@ -384,8 +384,12 @@ function mediaFramesDue(session,key) {
   return due;
 }
 function pumpCarrierMedia(session) {
-  for(let n=mediaFramesDue(session,"rxClock");n>0;n--)playoutCarrierDownlink(session);
-  for(let n=mediaFramesDue(session,"txClock");n>0;n--)flushCarrierUplink(session);
+  // Never burst several audio frames after a delayed Windows timer callback.
+  // A burst is technically lossless but sounds like jumping/stuttering in the
+  // browser. The jitter queue trims stale frames; the playout clock remains
+  // continuous at one 20 ms frame per tick.
+  if(mediaFramesDue(session,"rxClock")>0)playoutCarrierDownlink(session);
+  if(mediaFramesDue(session,"txClock")>0)flushCarrierUplink(session);
 }
 function lowestQueuedSequence(session) {
   let best=null,bestDelta=Infinity;
