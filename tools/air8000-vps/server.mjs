@@ -217,9 +217,9 @@ async function ensureRtpSession(deviceID) {
     // LAN Wi-Fi tests have measured roughly 190 ms of jitter. Keep more than
     // that in the startup cushion so a burst is not played as repeated gaps.
     rxWarmupFrames:24,
-    rxHoldMs:1200,
+    rxHoldMs:2000,
     rxMissingGraceMs:80,
-    targetDelayMs:400,
+    targetDelayMs:800,
     rxMissingSince:0,
     lastPcm8:null,
     concealFrames:0,
@@ -269,8 +269,8 @@ async function ensureRtpSession(deviceID) {
         // WebRTC-style adaptive jitter target: keep a bounded cushion above
         // the measured network variation, but never let the startup buffer
         // consume the entire latency budget.
-        session.targetDelayMs=Math.max(360,Math.min(800,Math.ceil((session.jitterMs*2+160)/20)*20));
-        session.rxWarmupFrames=Math.max(18,Math.min(40,Math.ceil(session.targetDelayMs/20)));
+        session.targetDelayMs=Math.max(480,Math.min(1200,Math.ceil((session.jitterMs*4+160)/20)*20));
+        session.rxWarmupFrames=Math.max(24,Math.min(60,Math.ceil(session.targetDelayMs/20)));
       }
     }
     session.lastArrivalMs=now;
