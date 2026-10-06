@@ -23,12 +23,15 @@ if (Test-Path $secretFile) {
   try { & icacls.exe $secretFile /inheritance:r /grant:r "$env:USERNAME`:(R,W)" | Out-Null } catch { }
 }
 $deviceId = ""
+$deviceSecret = ""
 $enrollment = ""
 $relayHost = ""
 if (Test-Path $deviceConfig) {
   $configText = Get-Content -Raw -LiteralPath $deviceConfig
   $deviceIdMatch = [regex]::Match($configText, 'device_id\s*=\s*"([^"]+)"')
   if ($deviceIdMatch.Success -and $deviceIdMatch.Groups[1].Value -notlike "REPLACE_WITH_*") { $deviceId = $deviceIdMatch.Groups[1].Value }
+  $secretMatch = [regex]::Match($configText, 'device_secret\s*=\s*"([^"]+)"')
+  if ($secretMatch.Success -and $secretMatch.Groups[1].Value -notlike "REPLACE_WITH_*") { $deviceSecret = $secretMatch.Groups[1].Value }
   $match = [regex]::Match($configText, 'enrollment_token\s*=\s*"([^"]+)"')
   if ($match.Success -and $match.Groups[1].Value -notlike "REPLACE_WITH_*") { $enrollment = $match.Groups[1].Value }
   $relayMatch = [regex]::Match($configText, 'relay_url\s*=\s*"[^:]+://([^/:"]+)')
@@ -41,7 +44,11 @@ $env:PORT = [string]$Port
 $env:LAN_MODE = "true"
 $env:ADMIN_TOKEN = $admin
 $env:AUTO_ENROLL_TOKEN = if ([string]::IsNullOrWhiteSpace($enrollment)) { "" } else { $enrollment }
-$env:DEVICE_REGISTRY_JSON = "{}"
+$registry = @{}
+if (-not [string]::IsNullOrWhiteSpace($deviceId) -and -not [string]::IsNullOrWhiteSpace($deviceSecret)) {
+  $registry[$deviceId] = @{ enrolled = $true; secret = $deviceSecret }
+}
+$env:DEVICE_REGISTRY_JSON = if ($registry.Count) { $registry | ConvertTo-Json -Compress } else { "{}" }
 $addresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })
 $ip = $null
 if ($relayHost) { $ip = $addresses | Where-Object { $_.IPAddress -eq $relayHost } | Select-Object -First 1 -ExpandProperty IPAddress }
