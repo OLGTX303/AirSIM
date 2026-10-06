@@ -464,7 +464,11 @@ function playoutCarrierDownlink(session) {
   if(advanceSequence)session.rxExpected=(session.rxExpected+1)&0xffff;
   // Silence also runs through the interpolator so its filter rings out
   // smoothly instead of cutting speech with a click.
-  const pcm=session.upsample(pcm8);
+  const device=devices.get(session.device_id);
+  // SIP bridge is PCMU/8 kHz end to end. Do not upsample its browser leg;
+  // doing so while advertising 8 kHz doubles each frame and causes blocky
+  // playback. The legacy carrier_rtp path keeps its historical 16 kHz leg.
+  const pcm=sipBridgeEnabled(device) ? pcm8 : session.upsample(pcm8);
   if(payload){
     stats.downlink_frames++;
     stats.downlink_bytes+=pcm.length;
@@ -511,7 +515,9 @@ function flushCarrierUplink(session) {
 function sendPcmToCarrier(deviceID,raw) {
   const session=rtpSessions.get(deviceID);
   if(!session)return false;
-  const data=session.downsample(Buffer.isBuffer(raw)?raw:Buffer.from(raw));
+  const device=devices.get(deviceID);
+  const input=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
+  const data=sipBridgeEnabled(device) ? input : session.downsample(input);
   session.uplinkActive=true;
   if(data.length===0)return true;
   session.pendingUplink=Buffer.concat([session.pendingUplink,data]);
@@ -601,7 +607,7 @@ const server=http.createServer(async (req,res)=>{
       const ticket=issueMediaTicket(id);
       const proto=String(req.headers["x-forwarded-proto"]||"http").split(",")[0];
       const direct=nativePcmEnabled(d);
-      const browserRate=direct ? (d.media_rate||8000) : 8000;
+      const browserRate=direct ? (d.media_rate||8000) : sipBridgeEnabled(d) ? 8000 : 16000;
       return json(res,201,{
         expires_in:60,
         sample_rate:browserRate,
