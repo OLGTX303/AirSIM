@@ -63,7 +63,7 @@ assert.match(page,/automatic 45 s recovery/);
 assert.match(page,/media-stalled/);
 assert.match(page,/voice\.downlinkPackets>=50&&reference&&Date\.now\(\)-reference>30000/);
 assert.match(page,/const reference=voice\.lastDownlinkAt;/);
-assert.match(page,/if\(!voice\.wantActive\)render\(\);/);
+assert.match(page,/if\(!voice\.wantActive\)\{render\(\);showVoiceMode\(\)\}/);
 assert.match(page,/event\.code===4001/);
 assert.match(page,/Carrier call ended/);
 assert.match(server,/SERVER_INSTANCE_ID/);

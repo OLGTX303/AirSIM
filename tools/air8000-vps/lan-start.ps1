@@ -44,6 +44,8 @@ $env:PORT = [string]$Port
 $env:LAN_MODE = "true"
 $env:ADMIN_TOKEN = $admin
 $env:AUTO_ENROLL_TOKEN = if ([string]::IsNullOrWhiteSpace($enrollment)) { "" } else { $enrollment }
+$env:LAN_BOOTSTRAP_ENABLED = if ([string]::IsNullOrWhiteSpace($enrollment) -and [string]::IsNullOrWhiteSpace($deviceSecret)) { "true" } else { "false" }
+$env:LAN_BOOTSTRAP_DEVICE_ID = $deviceId
 $registry = @{}
 if (-not [string]::IsNullOrWhiteSpace($deviceId) -and -not [string]::IsNullOrWhiteSpace($deviceSecret)) {
   $registry[$deviceId] = @{ enrolled = $true; secret = $deviceSecret }

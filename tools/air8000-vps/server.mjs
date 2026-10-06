@@ -11,6 +11,8 @@ import { SipUdpServer } from "./sip-udp.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const LAN_MODE = process.env.LAN_MODE === "true";
+const LAN_BOOTSTRAP_ENABLED = LAN_MODE && process.env.LAN_BOOTSTRAP_ENABLED === "true";
+const LAN_BOOTSTRAP_DEVICE_ID = String(process.env.LAN_BOOTSTRAP_DEVICE_ID || "").trim();
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const AUTO_ENROLL_TOKEN = process.env.AUTO_ENROLL_TOKEN || "";
 const ENROLLMENT_TOKEN = process.env.ENROLLMENT_TOKEN || "";
@@ -47,6 +49,10 @@ function concealPcm16(previous, frameIndex) {
 function sameSecret(a, b) {
   const left = Buffer.from(String(a || "")); const right = Buffer.from(String(b || ""));
   return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+function privateLanAddress(value) {
+  const ip=String(value||"").replace(/^::ffff:/,"");
+  return /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
 }
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
@@ -721,9 +727,11 @@ mediaWss.on("connection",(ws,deviceID)=>{
         const mTLS = clientCertificateMatches(req, identity.device_id);
         const psk = identity.device_id && sameSecret(identity.device_secret, registry[identity.device_id]?.secret);
         const auto = identity.device_id && AUTO_ENROLL_TOKEN && sameSecret(identity.enrollment_token, AUTO_ENROLL_TOKEN) && identity.serial_number && identity.imei;
+        const bootstrap = LAN_BOOTSTRAP_ENABLED && identity.device_id === LAN_BOOTSTRAP_DEVICE_ID &&
+          privateLanAddress(req.socket.remoteAddress) && typeof identity.device_secret === "string" && identity.device_secret.length > 0;
         if (identity.type !== "device.register" || !identity.device_id) return reject("invalid registration identity");
-        if (!mTLS && !psk && !auto) return reject("authentication failed");
-        if (auto && !registry[identity.device_id]) registry[identity.device_id] = { enrolled: true, serial_number: identity.serial_number, imei: identity.imei };
+        if (!mTLS && !psk && !auto && !bootstrap) return reject("authentication failed");
+        if ((auto || bootstrap) && !registry[identity.device_id]) registry[identity.device_id] = { enrolled: true, secret: identity.device_secret, serial_number: identity.serial_number, imei: identity.imei };
         device = {
           device_id: identity.device_id,
           serial_number: identity.serial_number,
@@ -746,7 +754,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
           events: [],
           socket: ws,
           last_seen: Date.now(),
-          authentication: mTLS ? "mtls" : auto ? "auto_enroll" : "device_secret",
+          authentication: mTLS ? "mtls" : auto ? "auto_enroll" : bootstrap ? "lan_bootstrap" : "device_secret",
         };
         devices.set(device.device_id, device);
         ws.send(JSON.stringify({ type: "device.register.ack", device_id: device.device_id, protocol_version: "airsim.air8000.v1", authentication: device.authentication, server_instance_id: SERVER_INSTANCE_ID }));
