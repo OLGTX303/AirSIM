@@ -561,6 +561,27 @@ if media_backend=="sip_bridge" and exsip then
         elseif event_type=="media" and action=="stop" then
             disable_bridge_tone("sip_media_stop")
             announce_media("media.close")
+        elseif event_type=="voip" and action=="stats" and type(payload)=="table" then
+            -- Native VoIP counters: tx_packets should rise by about 250 per
+            -- 5 s report. Fewer means the CC->SIP bridge is starving.
+            local cc_quality=0
+            if cc and type(cc.quality)=="function" then
+                local ok,value=pcall(cc.quality)
+                if ok then cc_quality=tonumber(value) or 0 end
+            end
+            if _G.relay_client then
+                _G.relay_client:send("media.voip_stats",{
+                    tx_packets=tonumber(payload.tx_packets) or 0,
+                    rx_packets=tonumber(payload.rx_packets) or 0,
+                    rx_lost=tonumber(payload.rx_lost) or 0,
+                    rx_out_of_order=tonumber(payload.rx_out_of_order) or 0,
+                    rx_bad_payload=tonumber(payload.rx_bad_payload) or 0,
+                    event_send_failures=tonumber(payload.event_send_failures) or 0,
+                    cc_quality=cc_quality,
+                    cc_downlink_guard=ccguard.enabled==true,
+                    uptime_ms=now_ms(),
+                },now_ms())
+            end
         elseif event_type=="voip" and action=="state" and tostring(payload)=="started" then
             if _G.call_service and _G.call_service.current and
                _G.call_service.current.state~="CONNECTED" then
@@ -754,6 +775,15 @@ local function handle_relay_message(raw,fin,opcode)
         return
     end
     if msg.type == "command.wifi_connect" then handle_wifi_connect(id,p); return end
+    if msg.type == "command.audio_guard" then
+        -- Live A/B switch for the CC downlink guard (media/ccguard.lua).
+        local ok,err
+        if p.enabled==false then ok,err=ccguard.disable(cc) else ok,err=ccguard.enable(cc,zbuff) end
+        status.cc_downlink_guard=ccguard.enabled==true
+        if log then log.info("airsim.media","cc_downlink_guard",tostring(ccguard.enabled==true),tostring(err or "")) end
+        send_command_result(id,ok==true,err,{cc_downlink_guard=ccguard.enabled==true})
+        return
+    end
     if msg.type == "command.wifi_disconnect" then
         local before=publish_wifi("DISCONNECTING")
         send_command_result(id,true,nil,before)

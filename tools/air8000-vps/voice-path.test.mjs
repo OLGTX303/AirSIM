@@ -62,6 +62,12 @@ assert.match(server,/DEVICE_RING_CUSHION_FRAMES = 3/);
 assert.match(server,/msg\.type === "call\.audio_start" && sipBridgeEnabled\(device\)/);
 assert.match(server,/if\(!session\.uplinkActive\)session\.txCushionFrames=DEVICE_RING_CUSHION_FRAMES/);
 assert.match(server,/uplink_cushion_frames/);
+assert.match(server,/"audio_guard"\]\.includes\(value\.type\)/);
+assert.match(server,/msg\.type === "media\.voip_stats"/);
+assert.match(server,/next\.tx_pps=Math\.round/);
+assert.match(server,/stats\.rtp_rx_pps=/);
+assert.match(page,/command\('audio_guard',\{enabled:false\}\)/);
+assert.match(page,/Air8000 bridge rate \(expect 50\/s\)/);
 
 assert.match(page,/targetLead:0\.36/);
 assert.match(page,/sampleRate\*0\.36/);

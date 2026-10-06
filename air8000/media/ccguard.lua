@@ -34,6 +34,17 @@ function M.enable(cc, zbuff)
     if not ok or result == false then return false, ok and "cc_record_failed" or tostring(result) end
     -- The firmware stores raw pointers to these buffers: keep them alive.
     M.buffers = buffers
+    M.enabled = true
+    return true
+end
+
+-- Restores the firmware default (drain + delete per CC block) for A/B
+-- listening tests. Buffers stay referenced until enable() replaces them.
+function M.disable(cc)
+    if not cc or type(cc.record) ~= "function" then return false, "cc_record_unavailable" end
+    local ok, result = pcall(cc.record, false)
+    if not ok or result == false then return false, ok and "cc_record_failed" or tostring(result) end
+    M.enabled = false
     return true
 end
 

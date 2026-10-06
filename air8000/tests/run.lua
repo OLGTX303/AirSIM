@@ -164,6 +164,10 @@ ok("CC downlink guard enables firmware-safe recording for the SIP bridge", funct
   assert(args[1]==true and args[2]==created[1] and args[3]==created[2] and args[4]==created[3] and args[5]==created[4])
   assert(created[1].size==6400 and created[3].size==640)
   assert(G.buffers[1]==created[1])
+  assert(G.enabled==true)
+  local off
+  assert(G.disable({record=function(on) off=on; return true end})==true)
+  assert(off==false and G.enabled==false)
   assert(select(2,G.enable({},zb))=="cc_record_unavailable")
   assert(select(2,G.enable({record=function() return false end},zb))=="cc_record_failed")
   local fp=assert(io.open("main.lua","r")); local src=fp:read("*a"); fp:close()
@@ -174,6 +178,9 @@ ok("CC downlink guard enables firmware-safe recording for the SIP bridge", funct
   local a=assert(io.open("media/ccguard.lua","r")):read("*a")
   local b=assert(io.open("media.ccguard.lua","r")):read("*a")
   assert(a==b,"flat LuatTools copy must match")
+  assert(src:find('msg.type == "command.audio_guard"',1,true))
+  assert(src:find('ccguard.disable(cc)',1,true))
+  assert(src:find('action=="stats"',1,true) and src:find('"media.voip_stats"',1,true))
 end)
 
 ok("bundle file names fit the LuatOS 24-byte limit", function()

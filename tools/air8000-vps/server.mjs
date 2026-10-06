@@ -75,7 +75,7 @@ function privateLanAddress(value) {
 function admin(req) { return sameSecret((req.headers.authorization || "").replace(/^Bearer\s+/i, ""), ADMIN_TOKEN); }
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); res.end(body); }
 async function body(req) { let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 65536) throw Error("body too large"); } return JSON.parse(raw || "{}"); }
-function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, voice_mode:d.voice_mode || d.status?.voice_mode || null, stock_firmware_voice_supported:!!(d.status?.stock_firmware_voice_supported || d.capabilities?.stock_firmware_voice_supported), media_backend:d.media_backend || d.status?.media_backend || null, media_phase:d.media_phase || d.status?.media_phase || "IDLE", media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), media_recovery_count:d.media_recovery_count||0, server_instance_id:SERVER_INSTANCE_ID, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
+function publicDevice(d) { return { device_id:d.device_id, serial_number:d.serial_number, device_type:d.device_type, hardware_model:d.hardware_model, firmware:d.firmware, capabilities:d.capabilities, status:d.status, location:d.location || d.status?.location || null, wifi:d.wifi || d.status?.wifi || null, voice_mode:d.voice_mode || d.status?.voice_mode || null, stock_firmware_voice_supported:!!(d.status?.stock_firmware_voice_supported || d.capabilities?.stock_firmware_voice_supported), media_backend:d.media_backend || d.status?.media_backend || null, media_phase:d.media_phase || d.status?.media_phase || "IDLE", media_transport:d.media_transport || null, real_early_media:!!(d.status?.real_early_media || d.media_backend==="sip_bridge"), rtp_ready:!!d.rtp_ready, media_rate:d.media_rate || 8000, media_uplink_rate:d.media_uplink_rate || 8000, cellular_voice_rate:d.cellular_voice_rate || d.status?.cellular_voice_rate || 0, wideband_volte:!!(d.wideband_volte || d.status?.wideband_volte), voice_codec:d.voice_codec || d.status?.voice_codec || null, media_stats:d.media_stats || emptyMediaStats(), media_recovery_count:d.media_recovery_count||0, voip_stats:d.voip_stats||null, cc_downlink_guard:d.cc_downlink_guard ?? d.status?.cc_downlink_guard ?? null, server_instance_id:SERVER_INSTANCE_ID, events:d.events || [], connected:!!d.socket, last_seen:d.last_seen }; }
 function command(id, type, payload) { const d=devices.get(id); if (!d?.socket || d.socket.readyState !== 1) return false; const item={protocol_version:"airsim.air8000.v1",message_id:crypto.randomUUID(),device_id:id,timestamp:Date.now(),nonce:crypto.randomUUID(),type:"command."+type,payload}; d.socket.send(JSON.stringify(item)); commands.set(item.message_id,{...item,created_at:Date.now()}); return item.message_id; }
 function issueMediaTicket(deviceID) { const ticket=crypto.randomBytes(24).toString("base64url"); mediaTickets.set(ticket,{device_id:deviceID,expires:Date.now()+60000}); return ticket; }
 function emptyMediaStats() {
@@ -255,6 +255,11 @@ async function ensureRtpSession(deviceID) {
     const stats=getMediaStats(deviceID);
     stats.rtp_rx_packets++;
     stats.last_activity=now;
+    // Arrival rate from the Air8000. A healthy CC->SIP bridge sends 50/s;
+    // fewer means the device is starving, not the network or gateway.
+    if(!stats.rtp_rx_first_at)stats.rtp_rx_first_at=now;
+    const rxSeconds=(now-stats.rtp_rx_first_at)/1000;
+    if(rxSeconds>=1)stats.rtp_rx_pps=Math.round(stats.rtp_rx_packets/rxSeconds*10)/10;
     if(streamStart){
       // The media ticket can exist long before the modem sends its first RTP
       // packet. Align the playout clock here; otherwise mediaFramesDue() tries
@@ -661,7 +666,7 @@ const server=http.createServer(async (req,res)=>{
     }
     if (req.method === "POST" && match) {
       const value=await body(req); const id=decodeURIComponent(match[1]);
-      if (!["dial","answer","reject","hangup","dtmf","send_sms","gps_request","wifi_config","wifi_connect","wifi_disconnect"].includes(value.type)) return json(res,400,{error:"unsupported command"});
+      if (!["dial","answer","reject","hangup","dtmf","send_sms","gps_request","wifi_config","wifi_connect","wifi_disconnect","audio_guard"].includes(value.type)) return json(res,400,{error:"unsupported command"});
       const d=devices.get(id);
       if(value.type==="dial" && sipBridgeEnabled(d)){
         try {
@@ -884,6 +889,28 @@ mediaWss.on("connection",(ws,deviceID)=>{
         // this event is sent. Re-establish the jitter cushion.
         const session=rtpSessions.get(device.device_id);
         if(session)session.txCushionFrames=DEVICE_RING_CUSHION_FRAMES;
+      }
+      if (msg.type === "media.voip_stats" && msg.payload && typeof msg.payload === "object") {
+        const p=msg.payload, prev=device.voip_stats;
+        const next={
+          tx_packets:Number(p.tx_packets)||0, rx_packets:Number(p.rx_packets)||0,
+          rx_lost:Number(p.rx_lost)||0, rx_bad_payload:Number(p.rx_bad_payload)||0,
+          event_send_failures:Number(p.event_send_failures)||0,
+          cc_quality:Number(p.cc_quality)||0, cc_downlink_guard:p.cc_downlink_guard===true,
+          uptime_ms:Number(p.uptime_ms)||0, received_at:Date.now(),
+          tx_pps:prev?.tx_pps??null, rx_pps:prev?.rx_pps??null,
+        };
+        // Rates between consecutive reports, using the device's own clock.
+        if(prev && next.uptime_ms>prev.uptime_ms && next.tx_packets>=prev.tx_packets){
+          const seconds=(next.uptime_ms-prev.uptime_ms)/1000;
+          next.tx_pps=Math.round((next.tx_packets-prev.tx_packets)/seconds*10)/10;
+          next.rx_pps=Math.round((next.rx_packets-prev.rx_packets)/seconds*10)/10;
+        }
+        device.voip_stats=next;
+        device.cc_downlink_guard=next.cc_downlink_guard;
+      }
+      if (msg.type === "device.command_result" && typeof msg.payload?.payload?.cc_downlink_guard === "boolean") {
+        device.cc_downlink_guard=msg.payload.payload.cc_downlink_guard;
       }
       if (msg.type === "media.rtp_config.ack") device.rtp_ready = msg.payload?.ok === true;
       if (["call.state", "call.media", "sms.received", "sms.sent", "device.command_result", "device.wifi", "device.location", "media.open", "media.early", "media.phase", "media.voice_quality", "media.transport_change"].includes(msg.type)) {
