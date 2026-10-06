@@ -14,6 +14,8 @@ assert.match(server,/rtp_jitter_ms/);
 assert.match(server,/pcm8=decodePcmuPayload\(payload\)/);
 assert.match(server,/const pcm=sipBridgeEnabled\(device\) \? pcm8 : session\.upsample\(pcm8\)/);
 assert.match(server,/const data=sipBridgeEnabled\(device\) \? input : session\.downsample\(input\)/);
+assert.match(server,/Let the browser AudioWorklet own the playout clock/);
+assert.match(server,/if\(!sipBridgeEnabled\(device\) && mediaFramesDue\(session,"rxClock"\)>0\)/);
 assert.doesNotMatch(server,/resamplePcm16/);
 assert.match(server,/fade the held/);
 assert.match(server,/const heldFrames=Math\.floor/);

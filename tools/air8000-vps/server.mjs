@@ -282,10 +282,28 @@ async function ensureRtpSession(deviceID) {
       return;
     }
     if(delta>0)stats.rtp_reordered_packets++;
-    session.rxQueue.set(parsed.sequence,parsed.payload);
-    if(!session.rxStarted && session.rxQueue.size>=session.rxWarmupFrames)session.rxStarted=true;
 
     const device=devices.get(deviceID);
+    if(device && sipBridgeEnabled(device)){
+      // Let the browser AudioWorklet own the playout clock. The reference
+      // gateway uses the same single-producer/single-consumer model: RTP
+      // arrival only fills the audio queue; Windows timers must not retime
+      // every 20 ms block before it reaches the real-time audio clock.
+      session.rxExpected=(parsed.sequence+1)&0xffff;
+      session.rxStarted=true;
+      const pcm=decodePcmuPayload(parsed.payload);
+      session.lastPcm8=pcm;
+      stats.downlink_frames++;
+      stats.downlink_bytes+=pcm.length;
+      updatePcmMetrics(stats,"downlink",pcm);
+      stats.last_activity=Date.now();
+      const peer=mediaPeers.get(deviceID);
+      if(peer?.readyState===1)peer.send(pcm,{binary:true});
+      else stats.dropped_downlink_frames++;
+      return;
+    }
+    session.rxQueue.set(parsed.sequence,parsed.payload);
+    if(!session.rxStarted && session.rxQueue.size>=session.rxWarmupFrames)session.rxStarted=true;
     if(device){
       device.media_transport=sipBridgeEnabled(device)?"sip_rtp":"carrier_rtp";
       device.media_rate=8000;
@@ -390,7 +408,8 @@ function pumpCarrierMedia(session) {
   // A burst is technically lossless but sounds like jumping/stuttering in the
   // browser. The jitter queue trims stale frames; the playout clock remains
   // continuous at one 20 ms frame per tick.
-  if(mediaFramesDue(session,"rxClock")>0)playoutCarrierDownlink(session);
+  const device=devices.get(session.device_id);
+  if(!sipBridgeEnabled(device) && mediaFramesDue(session,"rxClock")>0)playoutCarrierDownlink(session);
   if(mediaFramesDue(session,"txClock")>0)flushCarrierUplink(session);
 }
 function lowestQueuedSequence(session) {
