@@ -40,7 +40,7 @@ local sip_cfg=type(cfg.sip)=="table" and cfg.sip or {}
 local function real_value(value)
     return type(value)=="string" and value~="" and not value:match("^REPLACE") and value~="example.invalid"
 end
-local sip_credentials=real_value(sip_cfg.sip_password or sip_cfg.password) and
+local sip_credentials=(real_value(sip_cfg.sip_password or sip_cfg.password) or real_value(cfg.device_secret)) and
     real_value(sip_cfg.sip_server_addr or sip_cfg.server_addr)
 if cfg.voice_mode~="compatible" and cfg.voice_mode~="wideband" then
     if cfg.media_backend=="direct_pcm" then cfg.voice_mode="wideband"
@@ -208,6 +208,8 @@ local function init_stock_sip_bridge()
     if sip_cfg.enabled~=true then return false,"sip_bridge_disabled" end
     local username=sip_cfg.sip_username or sip_cfg.username or cfg.device_id
     local password=sip_cfg.sip_password or sip_cfg.password
+    if not real_value(password) then password=cfg.device_secret end
+    if not real_value(password) then password=username end
     local relay_host=type(cfg.relay_url)=="string" and cfg.relay_url:match("^[%w+.-]+://([^/:]+)") or nil
     local server=sip_cfg.sip_server_addr or sip_cfg.server_addr or relay_host
     if type(server)~="string" or server=="" or type(username)~="string" or username=="" or
