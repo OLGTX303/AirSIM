@@ -2,6 +2,7 @@ PROJECT="airsim-air8000"; VERSION="001.002.001"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
+local module_profile=require("system.module_profile")
 local device=require("protocol.device")
 local identity=require("cellular.identity")
 local ble_prov=require("ble.prov")
@@ -36,12 +37,15 @@ if fskv then
     }
 end
 if kv_api then cfg=settings.load(kv_api,cfg) end
-local gnss_api=_G.exgnss
-if not gnss_api then
-    local ok,module=pcall(require,"exgnss")
-    if ok and module then gnss_api=module; _G.exgnss=module end
+local gnss_api=nil
+if module_profile.has_gnss then
+    gnss_api=_G.exgnss
+    if not gnss_api then
+        local ok,module=pcall(require,"exgnss")
+        if ok and module then gnss_api=module; _G.exgnss=module end
+    end
+    if not gnss_api then gnss_api=libgnss end
 end
-if not gnss_api then gnss_api=libgnss end
 local sip_cfg=type(cfg.sip)=="table" and cfg.sip or {}
 local function real_value(value)
     return type(value)=="string" and value~="" and not value:match("^REPLACE") and value~="example.invalid"
@@ -68,7 +72,7 @@ if log then
         "sip_enabled",tostring(sip_cfg.enabled==true),"exsip",tostring(exsip~=nil))
 end
 local device_identity=identity.read(mobile,mcu,cfg)
-local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.voice_mode=cfg.voice_mode; status.stock_firmware_voice_supported=caps.stock_firmware_voice_supported; status.media_backend=media_backend; status.real_early_media=media_backend=="sip_bridge"; status.target_cellular_voice_rate=media_backend=="sip_bridge" and 8000 or nil; status.wideband_volte=false; status.media_transport=media_backend=="sip_bridge" and "sip_rtp" or "direct_pcm"; status.media_rate=8000; status.media_uplink_rate=8000
+local status=device.status(caps,device_identity,module_profile); status.firmware=tostring(_G.VERSION or VERSION); status.voice_mode=cfg.voice_mode; status.stock_firmware_voice_supported=caps.stock_firmware_voice_supported; status.media_backend=media_backend; status.real_early_media=media_backend=="sip_bridge"; status.target_cellular_voice_rate=media_backend=="sip_bridge" and 8000 or nil; status.wideband_volte=false; status.media_transport=media_backend=="sip_bridge" and "sip_rtp" or "direct_pcm"; status.media_rate=8000; status.media_uplink_rate=8000; status.air8000a_features=module_profile.a_only_features
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
 
 local function now_ms()
@@ -134,7 +138,7 @@ local bridge_tone_active=false
 local bridge_tone_generation=0
 
 local function set_bridge_tone(enabled,reason)
-    if media_backend~="sip_bridge" then enabled=false end
+    if media_backend~="sip_bridge" or not module_profile.has_local_audio then enabled=false end
     bridge_tone_generation=bridge_tone_generation+1
     local generation=bridge_tone_generation
 
@@ -323,6 +327,9 @@ local function init_cc_backend()
 end
 
 local function init_audio_hardware()
+    if not module_profile.has_es8311 then
+        return false,"unsupported_module"
+    end
     if not exaudio or type(exaudio.setup)~="function" then
         return false,"exaudio_unavailable"
     end
@@ -753,6 +760,12 @@ end
 
 local function handle_gps_request(message_id)
     run_async(function()
+        if not module_profile.has_gnss then
+            local disabled={fix=false,fix_state="disabled",error="gnss_unsupported",timestamp=now_ms()}
+            publish_location(disabled)
+            send_command_result(message_id,false,"gnss_unsupported",disabled)
+            return
+        end
         local started,start_error=_G.gnss_service:start()
         if not started then
             local failed={fix=false,fix_state="unavailable",error=start_error,timestamp=now_ms()}
@@ -972,7 +985,7 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
         end
     end)
 end
-if log then log.info("airsim","Air8000A backend starting",PROJECT,VERSION) end
+if log then log.info("airsim","AirSIM backend starting",PROJECT,VERSION,"model",module_profile.model,"air8000a",tostring(module_profile.is_air8000a)) end
 if sys and sys.subscribe then
     sys.subscribe("CC_IND",function(s,value,session)
         if media_backend=="carrier_rtp" then carrier_rtp:on_cc(s,value,session) end
@@ -990,9 +1003,11 @@ if sys and sys.subscribe then
     sys.subscribe("IP_LOSE",function()
         if not (wlan and wlan.ready and wlan.ready()) then publish_wifi("IP_LOSE") end
     end)
-    sys.subscribe("GNSS_STATE",function(event,ticks)
-        if _G.gnss_service then publish_location(_G.gnss_service:on_state(event,now_ms())) end
-    end)
+    if module_profile.has_gnss then
+        sys.subscribe("GNSS_STATE",function(event,ticks)
+            if _G.gnss_service then publish_location(_G.gnss_service:on_state(event,now_ms())) end
+        end)
+    end
 end
 if sys and sys.timerLoopStart then
     sys.timerLoopStart(function()

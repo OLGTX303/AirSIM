@@ -1,7 +1,11 @@
 local M = {}
-function M.status(capabilities, identity)
+function M.status(capabilities, identity, profile)
     identity = identity or {}
-    return { device_type="air8000a", hardware_model="Air8000A", serial_number=identity.serial_number, imei=identity.imei,
+    profile=profile or {}
+    -- Keep the wire identity compatible with the existing AirSIM gateway;
+    -- expose the physical variant separately as module_model.
+    return { device_type="air8000a", hardware_model="Air8000A",
+        module_model=profile.model, serial_number=identity.serial_number, imei=identity.imei,
         capabilities=capabilities or {},
         online=true, sim_ready=false, network_registered=false, volte_ready=false, relay_connected=false,
         media_ready=false, gnss_state="disabled", wifi_state="unknown", uptime_sec=0,
