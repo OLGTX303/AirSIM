@@ -868,7 +868,12 @@ local function handle_relay_message(raw,fin,opcode)
         if media_backend=="sip_bridge" and type(instance)=="string" and instance~="" and instance~=last_sip_server_instance then
             local previous=last_sip_server_instance
             last_sip_server_instance=instance
-            refresh_sip_registration(previous and "gateway_restarted" or "gateway_sync")
+            -- The official sip_cc_bridge demo keeps SIP running after a
+            -- successful REGISTER. Restart only when an already-known
+            -- gateway instance changes; restarting on the first ACK causes a
+            -- needless media gap immediately after boot.
+            if previous then refresh_sip_registration("gateway_restarted")
+            elseif log then log.info("airsim.sip","registration_synced") end
         end
         return
     end
