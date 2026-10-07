@@ -142,7 +142,7 @@ local bridge_tone_active=false
 local bridge_tone_generation=0
 
 local function set_bridge_tone(enabled,reason)
-    if media_backend~="sip_bridge" or not module_profile.has_local_audio then enabled=false end
+    if media_backend~="sip_bridge" then enabled=false end
     bridge_tone_generation=bridge_tone_generation+1
     local generation=bridge_tone_generation
 
