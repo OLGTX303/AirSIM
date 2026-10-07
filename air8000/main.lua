@@ -350,9 +350,20 @@ local function init_audio_hardware()
     return true
 end
 
-local audio_ok,audio_err=init_audio_hardware()
-if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
-init_cc_backend()
+-- Air8000W Audio V2 initialization may yield inside exaudio.setup().  Keep
+-- audio, CC, and SIP startup inside a LuatOS coroutine; calling setup() from
+-- the main chunk raises "attempt to yield from outside a coroutine" and
+-- leaves SIP waiting forever for the network/backend to finish booting.
+local function start_device_backends()
+    local audio_ok,audio_err=init_audio_hardware()
+    if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
+    init_cc_backend()
+end
+if sys and sys.taskInit then
+    sys.taskInit(start_device_backends)
+else
+    start_device_backends()
+end
 
 local handoff_generation=0
 local function stop_media(finalize_cc)
