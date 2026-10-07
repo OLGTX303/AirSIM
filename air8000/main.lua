@@ -93,7 +93,8 @@ if wlan and wlan.init then pcall(wlan.init) end
 wifi_snapshot("BOOT")
 local function connect_saved_wifi()
     if not wlan or type(wlan.connect)~="function" or not cfg.wifi or
-       type(cfg.wifi.ssid)~="string" or cfg.wifi.ssid=="" then return false end
+       type(cfg.wifi.ssid)~="string" or cfg.wifi.ssid=="" or
+       cfg.wifi.ssid:match("^REPLACE_") then return false end
     if wlan.ready and wlan.ready()==true then return true end
     local stored_bssid=cfg.wifi.bssid
     local bssid=type(stored_bssid)=="string" and stored_bssid:match("^[%da-fA-F]+$") and

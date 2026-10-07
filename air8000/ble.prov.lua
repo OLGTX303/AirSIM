@@ -32,19 +32,10 @@ function M.start(cfg, identity, wlan_api, kv_api)
     if not wlan_api or not wlan_api.connect then return false, "wifi_unavailable" end
     local bt = bluetooth.init()
     if not bt then return false, "bluetooth_init_failed" end
+    -- main.lua initializes WLAN before starting BLE.  Re-running wlan.init()
+    -- here can reset the STA state on Air8000 and break provisioning just
+    -- after the GATT connection succeeds.
     local wifi_initialized = true
-    if wlan_api.init then
-        wifi_initialized = false
-        for attempt = 1, 5 do
-            local call_ok, init_result = pcall(wlan_api.init)
-            if log then log.info("airsim.ble", "wifi_init", attempt, call_ok, init_result) end
-            if call_ok and init_result ~= false then
-                wifi_initialized = true
-                break
-            end
-            sys.wait(500)
-        end
-    end
 
     local status_payload = safe_status(cfg, identity)
     local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
@@ -61,15 +52,24 @@ function M.start(cfg, identity, wlan_api, kv_api)
         if kv_api and kv_api.set then kv_api:set("config", cfg) end
     end
 
+    local publish_status
+
     local function connect_wifi(ssid, password, bssid)
         local binary_bssid = nil
         if type(bssid) == "string" and bssid:match("^[%da-fA-F]+$") and #bssid == 12 then binary_bssid = string.fromHex(bssid) end
         -- LuatOS documents wlan.connect(ssid, password, auto_reconnect, bssid).
-        if binary_bssid then return wlan_api.connect(ssid, password, 1, binary_bssid) end
-        return wlan_api.connect(ssid, password, 1)
+        local ok, result
+        if binary_bssid then ok, result = pcall(wlan_api.connect, ssid, password, 1, binary_bssid)
+        else ok, result = pcall(wlan_api.connect, ssid, password, 1) end
+        if log then log.info("airsim.ble", "wifi_connect", ok, result) end
+        if not ok then
+            publish_status("connect_error", "wifi_connect_failed")
+            return false
+        end
+        return result ~= false
     end
 
-    local function publish_status(state,error_message,event,data)
+    publish_status=function(state,error_message,event,data)
         local snap=wifi_status.snapshot(wlan_api,cfg,wifi_cache,event,data,os.time()*1000)
         if state then snap.state=state end
         snap.error=error_message
@@ -183,8 +183,7 @@ function M.start(cfg, identity, wlan_api, kv_api)
     local local_name = "A8-" .. suffix
     adv = ble_device:adv_create({
         addr_mode=ble.PUBLIC, channel_map=ble.CHNLS_ALL, intv_min=120, intv_max=120,
-        adv_data={{ble.FLAGS, string.char(0x06)}, {ble.COMPLETE_LOCAL_NAME, local_name}},
-        adv_prop=ble.ADV_PROP_CONNECTABLE | ble.ADV_PROP_SCANNABLE
+        adv_data={{ble.FLAGS, string.char(0x06)}, {ble.COMPLETE_LOCAL_NAME, local_name}}
     })
     if not adv then return false, "advertise_create_failed" end
     if log then log.info("airsim.ble", "gatt_ready", M.SERVICE_UUID, local_name) end
