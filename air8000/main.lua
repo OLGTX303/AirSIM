@@ -110,9 +110,13 @@ local function connect_saved_wifi()
     return ok
 end
 if sys and sys.timerStart then sys.timerStart(connect_saved_wifi,1000) end
-if cfg.ble_pairing_code and cfg.ble_pairing_code ~= "REPLACE_WITH_6_DIGIT_PAIRING_CODE" then
+-- Keep BLE provisioning discoverable during first boot.  An unset pairing
+-- code makes the service read-only; it must never silently disable the
+-- advertisement, otherwise there is no way to discover the device and fix
+-- its provisioning configuration.
+if cfg.ble_enabled ~= false then
     local ok,err=ble_prov.start(cfg,device_identity,wlan,kv_api)
-    if not ok and log then log.warn("airsim.ble",err) end
+    if log then log.info("airsim.ble","start",tostring(ok),tostring(err or ""),ble_prov.SERVICE_UUID) end
 end
 local pcm=pcm_module.new(cc,nil,nil)
 _G.AIRSIM_VOICE_RATE=tonumber(cfg.voice_sample_rate) or 8000

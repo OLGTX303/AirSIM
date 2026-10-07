@@ -44,7 +44,13 @@ function M.start(cfg, identity, wlan_api, kv_api)
     local adv
     local connected = false
     local ble_state = "ready"
-    local pairing_code = tostring(cfg.ble_pairing_code or "")
+    local configured_pairing_code=tostring(cfg.ble_pairing_code or "")
+    local pairing_code=nil
+    if configured_pairing_code:match("^%d%d%d%d%d%d$") then
+        pairing_code=configured_pairing_code
+    elseif log then
+        log.warn("airsim.ble","pairing_code_not_configured","advertising_read_only")
+    end
 
     local function persist_wifi(ssid, password, bssid, security, enrollment_token)
         cfg.wifi = { ssid = ssid, password = password, bssid = bssid, security = security or "auto" }
@@ -120,7 +126,7 @@ function M.start(cfg, identity, wlan_api, kv_api)
         if log then log.info("airsim.ble", "write_target", service_uuid, characteristic_uuid, #raw) end
         if service_uuid ~= M.SERVICE_UUID or characteristic_uuid ~= M.CONFIG_UUID then return end
         local request = json.decode(raw)
-        if type(request) ~= "table" or request.pairing_code ~= pairing_code then
+        if type(request) ~= "table" or not pairing_code or request.pairing_code ~= pairing_code then
             if log then log.info("airsim.ble", "write_rejected", type(request) == "table" and request.op or "invalid", type(request) == "table" and request.pairing_code == pairing_code or false) end
             publish_status("rejected", "invalid_pairing_or_wifi")
             return
