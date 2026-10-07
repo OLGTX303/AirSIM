@@ -604,6 +604,11 @@ local function emit_event(kind,payload)
             -- down both legs when either side ends.
             if payload.event=="dial" then
                 media_phase:transition(media_phase_module.DIALING,"dial")
+                -- The official Air8000 sip_cc_bridge demo requests network
+                -- ringback immediately after cc.dial(). Starting it later
+                -- from media-ready/voip-start can overlap or restart the
+                -- carrier's early-media stream and sounds like double audio.
+                set_bridge_tone(true,"cellular_dial")
             elseif payload.event=="connected" then
                 media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"cellular_connected")
                 disable_bridge_tone("cellular_connected")
@@ -692,9 +697,9 @@ if media_backend=="sip_bridge" and exsip then
             -- A gateway resume re-opens SIP media on an already CONNECTED
             -- cellular call. Ringback must never be mixed into live speech.
             local current=_G.call_service and _G.call_service.current
-            if current and tostring(current.state or "")~="CONNECTED" then
-                set_bridge_tone(true,"sip_183_media_ready")
-            else
+            -- bridgeTone was requested at the cellular dial boundary; do not
+            -- restart it when the SIP RTP session becomes ready.
+            if not current or tostring(current.state or "")=="CONNECTED" then
                 disable_bridge_tone("sip_media_ready_connected")
             end
         elseif event_type=="media" and action=="stop" then
@@ -725,10 +730,8 @@ if media_backend=="sip_bridge" and exsip then
                 },now_ms())
             end
         elseif event_type=="voip" and action=="state" and tostring(payload)=="started" then
-            if _G.call_service and _G.call_service.current and
-               _G.call_service.current.state~="CONNECTED" then
-                set_bridge_tone(true,"voip_started")
-            end
+            -- No bridgeTone call here: the official demo starts it after
+            -- cc.dial(), and repeating it at VoIP start can layer ringback.
         elseif event_type=="call" and (action=="ended" or action=="failed") then
             -- During a gateway-instance refresh the SIP dialog is intentionally
             -- replaced while the cellular call remains alive.
