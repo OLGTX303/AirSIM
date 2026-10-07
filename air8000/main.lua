@@ -2,7 +2,7 @@ PROJECT="airsim-air8000"; VERSION="001.002.001"
 local cfg=require("config")
 local settings=require("storage.settings")
 local capability=require("system.capability")
-local module_profile=require("system.module_profile")
+local module_profile=require("system.mod")
 local device=require("protocol.device")
 local identity=require("cellular.identity")
 local ble_prov=require("ble.prov")
