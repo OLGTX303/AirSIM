@@ -126,12 +126,10 @@ function M.start(cfg, identity, wlan_api, kv_api)
         if log then log.info("airsim.ble", "write_target", service_uuid, characteristic_uuid, #raw) end
         if service_uuid ~= M.SERVICE_UUID or characteristic_uuid ~= M.CONFIG_UUID then return end
         local request = json.decode(raw)
-        if type(request) ~= "table" or not pairing_code or request.pairing_code ~= pairing_code then
-            if log then log.info("airsim.ble", "write_rejected", type(request) == "table" and request.op or "invalid", type(request) == "table" and request.pairing_code == pairing_code or false) end
-            publish_status("rejected", "invalid_pairing_or_wifi")
-            return
-        end
-        if request.op == "scan" then
+        -- Scanning only reads nearby SSIDs and is the first operation sent by
+        -- the provisioning UI.  Do not block it on the optional pairing code;
+        -- the code remains mandatory for changing Wi-Fi credentials below.
+        if type(request) == "table" and request.op == "scan" then
             if not wifi_initialized then
                 publish_status("scan_error", "wifi_not_initialized")
                 return
@@ -141,6 +139,11 @@ function M.start(cfg, identity, wlan_api, kv_api)
                 local scan_ok = wlan_api.scan()
                 if log then log.info("airsim.ble", "wifi_scan_started", scan_ok) end
             end, 100)
+            return
+        end
+        if type(request) ~= "table" or not pairing_code or request.pairing_code ~= pairing_code then
+            if log then log.info("airsim.ble", "write_rejected", type(request) == "table" and request.op or "invalid", type(request) == "table" and request.pairing_code == pairing_code or false) end
+            publish_status("rejected", "invalid_pairing_or_wifi")
             return
         end
         if type(request.ssid) ~= "string" or #request.ssid == 0 or #request.ssid > 64 or type(request.password) ~= "string" or #request.password > 128 then
