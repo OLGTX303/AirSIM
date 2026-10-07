@@ -30,7 +30,7 @@ if(!window.isSecureContext){const warning=document.querySelector('#secure-warnin
 let devices=[]; const select=document.querySelector('#device');
 let voice=createVoiceState();let voiceStatusText='Voice bridge stopped';
 function auth(){return {Authorization:'Bearer '+(localStorage.airsimLanToken||''),'Content-Type':'application/json'}}
-let hostBlePairingCode='';
+let hostBlePairingCode='654321';
 async function api(path,opt={}){opt.headers={...auth(),...(opt.headers||{})};const r=await fetch(path,opt);const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
 async function loadBlePairingCode(){try{const value=await api('/api/ble-config');hostBlePairingCode=value.pairing_code||'';const input=document.querySelector('#ble-pairing');if(input)input.value=hostBlePairingCode}catch{} }
 function write(x){document.querySelector('#log').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}
