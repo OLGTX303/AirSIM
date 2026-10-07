@@ -410,6 +410,15 @@ function releaseRtpMedia(deviceID) {
   // Do not let post-call playout silence inflate the next call's diagnostics.
   // A released carrier session must start with fresh RTP counters.
   resetMediaStats(deviceID);
+  const device=devices.get(deviceID);
+  if(device){
+    // VoIP counters are scoped to one native bridge instance. Keeping the
+    // last report after the RTP socket is released makes the dashboard show
+    // stale "device sends" while the bridge is actually stopped.
+    device.voip_stats=null;
+    device.cc_downlink_guard=null;
+    device.rtp_ready=false;
+  }
 }
 function mediaFramesDue(session,key) {
   const target=Math.floor((performance.now()-session.clockStart)/MEDIA_FRAME_MS);
@@ -952,7 +961,13 @@ mediaWss.on("connection",(ws,deviceID)=>{
   ws.on("close", () => {
     if (device?.device_id) {
       const current = devices.get(device.device_id);
-      if (current?.socket === ws) { current.socket = null; current.last_seen = Date.now(); }
+      if (current?.socket === ws) {
+        current.socket = null;
+        current.last_seen = Date.now();
+        current.voip_stats=null;
+        current.cc_downlink_guard=null;
+        current.rtp_ready=false;
+      }
     }
   });
  });
