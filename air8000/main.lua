@@ -142,7 +142,10 @@ local bridge_tone_active=false
 local bridge_tone_generation=0
 
 local function set_bridge_tone(enabled,reason)
-    if media_backend~="sip_bridge" then enabled=false end
+    -- Air8000W has no local codec and follows the official bridge_pcm
+    -- guidance: carrier early media is authoritative, so do not inject a
+    -- synthetic bridge tone that can overlap the modem's PLAY stream.
+    if media_backend~="sip_bridge" or module_profile.is_air8000w then enabled=false end
     bridge_tone_generation=bridge_tone_generation+1
     local generation=bridge_tone_generation
 
