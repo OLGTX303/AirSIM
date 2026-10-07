@@ -361,9 +361,35 @@ end
 -- audio, CC, and SIP startup inside a LuatOS coroutine; calling setup() from
 -- the main chunk raises "attempt to yield from outside a coroutine" and
 -- leaves SIP waiting forever for the network/backend to finish booting.
+local function wifi_network_ready()
+    if not wlan or not wlan.ready or wlan.ready()~=true then return false end
+    local ip
+    if wlan.getIP then ip=wlan.getIP() end
+    if (type(ip)~="string" or ip=="" or ip=="0.0.0.0") and wlan.getIp then ip=wlan.getIp() end
+    return type(ip)=="string" and ip~="" and ip~="0.0.0.0"
+end
+
+local function wait_for_sip_network()
+    if media_backend~="sip_bridge" then return end
+    local waited=0
+    while not wifi_network_ready() do
+        if log and waited==0 then log.info("airsim.sip","waiting_for_wifi_ip") end
+        if sys and sys.waitUntil then sys.waitUntil("IP_READY",1000)
+        elseif sys and sys.wait then sys.wait(1000)
+        else return end
+        waited=waited+1000
+    end
+    if socket and socket.dft and socket.LWIP_STA then pcall(socket.dft,socket.LWIP_STA) end
+    if log then log.info("airsim.sip","wifi_ip_ready",waited) end
+end
+
 local function start_device_backends()
     local audio_ok,audio_err=init_audio_hardware()
     if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
+    -- exsip locks its network adapter when start() is called.  Starting it
+    -- before Wi-Fi DHCP completes leaves the SIP task waiting forever for an
+    -- IP_READY event belonging to the wrong adapter.
+    wait_for_sip_network()
     init_cc_backend()
 end
 if sys and sys.taskInit then
@@ -910,27 +936,16 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
             sys.subscribe("IP_READY",function() ip_ready=true end)
             sys.subscribe("IP_LOSE",function() ip_ready=false end)
         end
-        local function network_ready()
-            -- Air8000 has a cellular IP_READY before Wi-Fi DHCP completes.
-            -- The LAN relay must wait for the Wi-Fi adapter and its address,
-            -- otherwise the first WebSocket follows the wrong interface and
-            -- has to be replaced during boot.
-            if not wlan or not wlan.ready or wlan.ready()~=true then return false end
-            local ip
-            if wlan.getIP then ip=wlan.getIP() end
-            if (type(ip)~="string" or ip=="" or ip=="0.0.0.0") and wlan.getIp then ip=wlan.getIp() end
-            return type(ip)=="string" and ip~="" and ip~="0.0.0.0"
-        end
         while true do
             -- The Air8000 WebSocket client must not be started during boot
             -- before the Wi-Fi adapter has acquired an address.  Otherwise
             -- connect() can remain pending without ever sending a handshake.
             local network_wait=0
-            while not network_ready() and network_wait < 30000 do
+            while not wifi_network_ready() and network_wait < 30000 do
                 sys.waitUntil("IP_READY", 1000)
                 network_wait=network_wait+1000
             end
-            if not network_ready() then
+            if not wifi_network_ready() then
                 if log then log.warn("airsim.relay", "network_wait_timeout") end
                 sys.wait(5000)
             end
