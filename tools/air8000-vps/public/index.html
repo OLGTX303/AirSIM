@@ -30,7 +30,9 @@ if(!window.isSecureContext){const warning=document.querySelector('#secure-warnin
 let devices=[]; const select=document.querySelector('#device');
 let voice=createVoiceState();let voiceStatusText='Voice bridge stopped';
 function auth(){return {Authorization:'Bearer '+(localStorage.airsimLanToken||''),'Content-Type':'application/json'}}
+let hostBlePairingCode='';
 async function api(path,opt={}){opt.headers={...auth(),...(opt.headers||{})};const r=await fetch(path,opt);const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
+async function loadBlePairingCode(){try{const value=await api('/api/ble-config');hostBlePairingCode=value.pairing_code||'';const input=document.querySelector('#ble-pairing');if(input)input.value=hostBlePairingCode}catch{} }
 function write(x){document.querySelector('#log').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}
 function current(){return devices.find(d=>d.device_id===select.value)}
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -429,7 +431,7 @@ bleConnect=async function(){await oldBleConnect();if(bleDevice)bleDevice.addEven
 bleScan=async function(){try{bleNetworks=[];await bleWrite({op:'scan'});bleStatus('Scanning Wi-Fi networks…')}catch(e){bleStatus('BLE error: '+e.message)}};
 bleConnectWifi=async function(){try{const pairing_code=blePairingCode();const picker=document.querySelector('#ble-ssid');const ssid=picker?.value||document.querySelector('#wifi-ssid')?.value||'';const network=bleNetworks.find(n=>n.ssid===ssid);if(!ssid)throw Error('Choose a Wi-Fi network first.');await bleWrite({pairing_code,op:'connect',ssid,password:document.querySelector('#wifi-password').value,bssid:network?.bssid||'',security:network?.security||'auto'});bleStatus('Wi-Fi credentials sent; the Air8000 is connecting…')}catch(e){bleStatus('BLE error: '+e.message)}};
 const originalSimplifyBleForm=simplifyBleForm;
-simplifyBleForm=function(){originalSimplifyBleForm();const pairing=document.querySelector('#ble-pairing');if(pairing){pairing.closest('.field')?.style.removeProperty('display');pairing.value='';pairing.placeholder='6 digits';pairing.inputMode='numeric';}};
+simplifyBleForm=function(){originalSimplifyBleForm();const pairing=document.querySelector('#ble-pairing');if(pairing){pairing.closest('.field')?.style.removeProperty('display');pairing.value=hostBlePairingCode||'';pairing.placeholder='6 digits';pairing.inputMode='numeric';}};
 const wifiObserver=new MutationObserver(simplifyBleForm);wifiObserver.observe(document.querySelector('#wifi'),{childList:true,subtree:true});
 select.addEventListener('change',render);document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.panel').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelector('#'+b.dataset.tab).classList.add('active')});
 const originalRender=render;
@@ -450,5 +452,5 @@ render=function(){
 };
 const renderWithPeakAnalysis=render;
 render=function(){renderWithPeakAnalysis();const d=current();const m=d?.media_stats||{};const host=document.querySelector('#calls');if(!host)return;let card=document.querySelector('#peak-analysis');if(!card){card=document.createElement('div');card.className='status';card.id='peak-analysis';host.appendChild(card)}card.innerHTML=`Peak analysis (not recorded)<br>DL peak ${esc(m.downlink_peak||0)} · RMS ${esc(m.downlink_rms||0)} · silent ${esc(m.downlink_silent_frames||0)} · clipped ${esc(m.downlink_clipped_frames||0)}<br>UL peak ${esc(m.uplink_peak||0)} · RMS ${esc(m.uplink_rms||0)} · silent ${esc(m.uplink_silent_frames||0)} · clipped ${esc(m.uplink_clipped_frames||0)}`};
-refresh();setInterval(refresh,1000);
+loadBlePairingCode();refresh();setInterval(refresh,1000);
 </script>

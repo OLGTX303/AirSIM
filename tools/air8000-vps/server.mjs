@@ -14,6 +14,7 @@ const LAN_MODE = process.env.LAN_MODE === "true";
 const LAN_BOOTSTRAP_ENABLED = LAN_MODE && process.env.LAN_BOOTSTRAP_ENABLED === "true";
 const LAN_BOOTSTRAP_DEVICE_ID = String(process.env.LAN_BOOTSTRAP_DEVICE_ID || "").trim();
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const BLE_PAIRING_CODE = /^\d{6}$/.test(String(process.env.BLE_PAIRING_CODE || "")) ? String(process.env.BLE_PAIRING_CODE) : "";
 const AUTO_ENROLL_TOKEN = process.env.AUTO_ENROLL_TOKEN || "";
 const ENROLLMENT_TOKEN = process.env.ENROLLMENT_TOKEN || "";
 const DEVICE_CA_CERT = process.env.DEVICE_CA_CERT || "/data/pki/device-ca.pem";
@@ -635,6 +636,7 @@ const server=http.createServer(async (req,res)=>{
     if (req.method === "GET" && u.pathname === "/api/health") return json(res,200,{ok:true,service:"airsim-air8000-vps",devices:devices.size,server_instance_id:SERVER_INSTANCE_ID});
     if (req.method === "POST" && u.pathname === "/api/enroll") return json(res,201,enrollDevice(await body(req)));
     if (!admin(req)) return json(res,401,{error:"unauthorized"});
+    if (req.method === "GET" && u.pathname === "/api/ble-config") return json(res,200,{pairing_code:BLE_PAIRING_CODE});
     if (req.method === "GET" && u.pathname === "/api/devices") return json(res,200,[...devices.values()].map(publicDevice));
     const match=u.pathname.match(/^\/api\/devices\/([^/]+)\/command$/);
     const mediaMatch=u.pathname.match(/^\/api\/devices\/([^/]+)\/media-ticket$/);
