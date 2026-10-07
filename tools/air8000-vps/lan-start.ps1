@@ -1,4 +1,4 @@
-param([int]$Port = 8080, [switch]$OpenLan)
+param([int]$Port = 8081, [switch]$OpenLan)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js 20 or newer is required." }

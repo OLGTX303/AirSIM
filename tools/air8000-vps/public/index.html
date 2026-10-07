@@ -7,7 +7,7 @@ body{font:15px system-ui;margin:24px;max-width:1100px;color:#18202a}input,button
 </style>
 <h1>Air8000 LAN Test</h1>
 <p class="muted">Real-device control panel. Wi-Fi provisioning is sent to the Air8000 over its authenticated LAN WebSocket.</p>
-<div id="secure-warning" class="status" style="display:none">BLE is blocked on this address. Open <a href="http://localhost:8080/">http://localhost:8080/</a> on the Windows PC, or use HTTPS. The LAN IP page is only for LAN controls.</div>
+<div id="secure-warning" class="status" style="display:none">BLE is blocked on this address. Open <a href="http://localhost:8081/">http://localhost:8081/</a> on the Windows PC, or use HTTPS. The LAN IP page is only for LAN controls.</div>
 <label>Device <select id="device"></select></label>
 <button onclick="refresh()">Refresh</button>
 <div class="tabs">
@@ -36,7 +36,7 @@ function current(){return devices.find(d=>d.device_id===select.value)}
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function events(type){return (current()?.events||[]).filter(e=>!type||e.type===type).slice().reverse()}
 function eventRows(type){const rows=events(type);return rows.length?rows.map(e=>`<div class="status"><b>${esc(e.payload?.event||e.type)}</b> — ${esc(JSON.stringify(e.payload||{}))}</div>`).join(''):'<p class="muted">No live events received from the device.</p>'}
-async function command(type,payload={}){const d=current();if(!d)return write('Select a connected Air8000 device first.');try{const result=await api('/api/devices/'+encodeURIComponent(d.device_id)+'/command',{method:'POST',body:JSON.stringify({type,payload})});write(result);if(!['dtmf','hangup','answer','reject'].includes(type))setTimeout(refresh,400);return result}catch(e){write(e.message);throw e}}
+async function command(type,payload={}){const d=current();if(!d)return write('Select a connected Air8000 device first.');try{const result=await api('/api/devices/'+encodeURIComponent(d.device_id)+'/command',{method:'POST',body:JSON.stringify({type,payload})});write(result);if(type==='audio_guard'){const panel=document.querySelector('#calls');if(panel){const next=payload.enabled===false?'OFF (pending device reply)':'ON (pending device reply)';panel.innerHTML=panel.innerHTML.replace(/(CC downlink guard:\s*<b>)[^<]*/,'$1'+next)}setTimeout(async()=>{try{devices=await api('/api/devices');const live=devices.find(x=>x.device_id===d.device_id);const currentPanel=document.querySelector('#calls');if(currentPanel&&live){const next=live.cc_downlink_guard===true?'ON':live.cc_downlink_guard===false?'OFF':'unknown';currentPanel.innerHTML=currentPanel.innerHTML.replace(/(CC downlink guard:\s*<b>)[^<]*/,'$1'+next)}}catch{}},1200)}else if(!['dtmf','hangup','answer','reject'].includes(type))setTimeout(refresh,400);return result}catch(e){write(e.message);throw e}}
 function incomingCall(){const latest=events('call.state')[0];return latest&&(latest.payload?.event==='incoming'||latest.payload?.call?.state==='INCOMING')?latest:null}
 async function callAction(type,payload,button,label){if(button?.disabled)return;const old=button?.textContent||label;if(button){button.disabled=true;button.textContent=type==='hangup'?'Ended':'Sending…'}if(type==='hangup'||type==='reject'){activeCallState='ENDED';voiceStatus('Call ended');if(voice.wantActive||voice.ctx)stopVoice().catch(()=>{})}try{await command(type,payload);if(button)button.textContent=type==='hangup'?'Ended':'Accepted';setTimeout(()=>{if(button){button.disabled=false;button.textContent=old}},700)}catch(e){if(button){button.disabled=false;button.textContent='Failed'}voiceStatus('Call command failed: '+e.message);setTimeout(()=>{if(button)button.textContent=old},1200)}}
 function dialDigit(value){const el=document.querySelector('#call-number');if(!el)return;el.value=(el.value||'')+value;localStorage.setItem('airsimDialNumber',el.value)}
@@ -237,6 +237,14 @@ async function playPcm(buffer){
 }
 async function openMediaSocket(deviceID,reconnecting=false){
   const token=++voice.socketGeneration;
+  // Invalidate the previous socket before opening its replacement. Otherwise
+  // the old socket can continue delivering PCM while the new socket is
+  // connecting, which produces a short double-layer/echo during recovery.
+  const old=voice.ws;
+  if(old){
+    voice.ws=null;
+    try{old.close(4000,'replaced-before-connect')}catch{}
+  }
   const ticket=await api('/api/devices/'+encodeURIComponent(deviceID)+'/media-ticket',{method:'POST'});
   if(!voice.wantActive||token!==voice.socketGeneration)throw Error('voice session changed');
   applyVoiceRate(ticket.downlink_sample_rate||ticket.sample_rate,ticket.uplink_sample_rate||ticket.sample_rate);
@@ -254,9 +262,7 @@ async function openMediaSocket(deviceID,reconnecting=false){
     ws.onclose=()=>{clearTimeout(timer);reject(Error('media WebSocket closed during connect'))};
   });
   if(!voice.wantActive||token!==voice.socketGeneration){try{ws.close()}catch{};throw Error('voice session changed')}
-  const old=voice.ws;
   voice.ws=ws;
-  if(old&&old!==ws)try{old.close(4000,'replaced')}catch{}
   voice.mediaConnectedAt=Date.now();
   voice.lastDownlinkAt=0;
   ws.onmessage=async e=>{
@@ -361,7 +367,7 @@ async function startVoice(){
     voice.wantActive=true;
     voice.deviceID=d.device_id;
     voiceStatus('Starting microphone / speaker…');
-    if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone requires HTTPS or http://localhost:8080.');
+    if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone requires HTTPS or http://localhost:8081.');
     const AudioContextClass=window.AudioContext||window.webkitAudioContext;
     if(!AudioContextClass)throw Error('Web Audio is unavailable');
 

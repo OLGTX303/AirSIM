@@ -17,6 +17,11 @@ local carrier_rtp_module=require("media.carrier_rtp")
 local media_manager=require("media.media_manager")
 local media_phase_module=require("media.phase")
 local ccguard=require("media.ccguard")
+local exaudio=nil
+do
+    local ok,module=pcall(require,"exaudio")
+    if ok and type(module)=="table" then exaudio=module end
+end
 local exsip=nil
 do
     local ok,module=pcall(require,"exsip")
@@ -86,12 +91,20 @@ end
 
 if wlan and wlan.init then pcall(wlan.init) end
 wifi_snapshot("BOOT")
-if wlan and wlan.connect and cfg.wifi and type(cfg.wifi.ssid)=="string" and cfg.wifi.ssid ~= "" then
+local function connect_saved_wifi()
+    if not wlan or type(wlan.connect)~="function" or not cfg.wifi or
+       type(cfg.wifi.ssid)~="string" or cfg.wifi.ssid=="" then return false end
+    if wlan.ready and wlan.ready()==true then return true end
     local stored_bssid=cfg.wifi.bssid
-    local bssid=type(stored_bssid)=="string" and stored_bssid:match("^[%da-fA-F]+$") and #stored_bssid==12 and string.fromHex(stored_bssid) or nil
-    if bssid then sys.timerStart(wlan.connect,1000,cfg.wifi.ssid,cfg.wifi.password or "",1,bssid)
-    else sys.timerStart(wlan.connect,1000,cfg.wifi.ssid,cfg.wifi.password or "",1) end
+    local bssid=type(stored_bssid)=="string" and stored_bssid:match("^[%da-fA-F]+$") and
+        #stored_bssid==12 and string.fromHex(stored_bssid) or nil
+    local ok
+    if bssid then ok=pcall(wlan.connect,cfg.wifi.ssid,cfg.wifi.password or "",1,bssid)
+    else ok=pcall(wlan.connect,cfg.wifi.ssid,cfg.wifi.password or "",1) end
+    if log then log.info("airsim.wifi","connect_request",tostring(ok)) end
+    return ok
 end
+if sys and sys.timerStart then sys.timerStart(connect_saved_wifi,1000) end
 if cfg.ble_pairing_code and cfg.ble_pairing_code ~= "REPLACE_WITH_6_DIGIT_PAIRING_CODE" then
     local ok,err=ble_prov.start(cfg,device_identity,wlan,kv_api)
     if not ok and log then log.warn("airsim.ble",err) end
@@ -103,6 +116,7 @@ local media_frames=0
 local media_bytes=0
 local uplink_frames=0
 local uplink_bytes=0
+local downlink_pacer_generation=0
 local downlink_pending=""
 local media_phase=media_phase_module.new(function(next_state,previous,reason)
     status.media_phase=next_state
@@ -184,6 +198,16 @@ end
 
 local function publish_voice_quality(reason)
     local rate=cellular_voice_rate()
+    -- Some SIP-bridge firmware builds return 0 from cc.quality() even after
+    -- the carrier audio callback is running.  Once audio-start/connected has
+    -- been observed, the bridge format is still known to be 8 kHz PCMU, so
+    -- publish that measured transport rate instead of leaving the dashboard
+    -- stuck at "Negotiating".  Do not claim this before media is active.
+    if rate<=0 and media_backend=="sip_bridge" and
+       (reason=="audio_start" or reason=="connected") and
+       _G.call_service and _G.call_service.current then
+        rate=8000
+    end
     if rate<=0 then return nil end
     local wideband=media_backend=="direct_pcm" and rate>=16000
     status.cellular_voice_rate=rate
@@ -259,11 +283,12 @@ local function init_cc_backend()
             local init_ok,init_result=pcall(cc.init,0)
             if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
             if not init_ok or init_result==false then return false,"cc_init_failed" end
-            -- Base firmware 113 discards CC downlink audio after each block
-            -- unless call recording is on; see media/ccguard.lua.
-            local guard_ok,guard_err=ccguard.enable(cc,zbuff)
-            status.cc_downlink_guard=guard_ok==true
-            if log then log.info("airsim.media","cc_downlink_guard",tostring(guard_ok),tostring(guard_err or "")) end
+            -- Do not enable cc.record() in CC-SIP bridge mode.  The official
+            -- Air8000 sip_cc_bridge demo leaves the native CC<->VoIP bridge
+            -- alone; recording buffers batch PCM and turn the RTP stream into
+            -- roughly 200 ms bursts (the observed ~4.6 packets/s symptom).
+            status.cc_downlink_guard=false
+            if log then log.info("airsim.media","cc_downlink_guard","disabled","native_sip_bridge") end
             local start_ok,start_result=pcall(exsip.start)
             if log then log.info("airsim.sip","start",tostring(start_ok and start_result)) end
             if not start_ok or start_result==false then return false,"exsip_start_failed" end
@@ -296,10 +321,41 @@ local function init_cc_backend()
     return false,"cc_init_unavailable"
 end
 
+local function init_audio_hardware()
+    if not exaudio or type(exaudio.setup)~="function" then
+        return false,"exaudio_unavailable"
+    end
+    -- Match module/Air8000/demo/sip_cc_bridge/audio_drv.lua.  The bridge
+    -- still needs the ES8311/I2S driver initialized before CC and VoIP start;
+    -- this is separate from exsip's AUDIO_MODE_BRIDGE selection.
+    local ok,result=pcall(exaudio.setup,{
+        model="es8311",
+        i2c_id=0,
+        pa_ctrl=162,
+        dac_ctrl=164,
+        dac_delay=6,
+        pa_delay=100,
+        dac_time_delay=100,
+        bits_per_sample=16,
+        pa_on_level=1,
+        audio_mode="new",
+    })
+    if not ok or result==false then
+        return false,ok and "exaudio_setup_failed" or tostring(result)
+    end
+    if type(exaudio.vol)=="function" then pcall(exaudio.vol,70) end
+    if type(exaudio.mic_vol)=="function" then pcall(exaudio.mic_vol,96) end
+    if log then log.info("airsim.media","audio_hardware","es8311","audio_mode","new") end
+    return true
+end
+
+local audio_ok,audio_err=init_audio_hardware()
+if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
 init_cc_backend()
 
 local handoff_generation=0
 local function stop_media(finalize_cc)
+    downlink_pacer_generation=downlink_pacer_generation+1
     if media_backend=="carrier_rtp" then
         carrier_rtp:stop(finalize_cc==true)
     else
@@ -320,29 +376,46 @@ end
 
 local function send_downlink(payload)
     if media_backend~="direct_pcm" then return end
-    if type(payload)~="string" or #payload==0 or not _G.relay_transport then return end
+    if type(payload)~="string" or #payload==0 then return end
     downlink_pending=downlink_pending..payload
-    local frame_bytes=math.floor((pcm.sample_rate or 8000)*2*20/1000)
-    while #downlink_pending>=frame_bytes do
-        local frame=downlink_pending:sub(1,frame_bytes)
-        downlink_pending=downlink_pending:sub(frame_bytes+1)
-        local sent=_G.relay_transport:send_binary(frame)
-        if sent then
-            media_frames=media_frames+1
-            media_bytes=media_bytes+#frame
-            if log and (media_frames==1 or media_frames%25==0) then
-                log.info("airsim.media","downlink",media_frames,media_bytes)
-            end
-        else
-            downlink_pending=frame..downlink_pending
-            local max_tail=(pcm.sample_rate==16000 and 6400 or 3200)
-            if #downlink_pending>max_tail then
-                downlink_pending=downlink_pending:sub(#downlink_pending-max_tail+1)
-            end
-            if log then log.warn("airsim.media","downlink_send_failed",#frame) end
-            break
-        end
+    local rate=pcm.sample_rate or 8000
+    local max_pending=math.floor(rate*2*400/1000)
+    if #downlink_pending>max_pending then
+        downlink_pending=downlink_pending:sub(#downlink_pending-max_pending+1)
     end
+end
+
+local function start_downlink_pacer()
+    downlink_pacer_generation=downlink_pacer_generation+1
+    local generation=downlink_pacer_generation
+    if not sys or not sys.taskInit then return end
+    sys.taskInit(function()
+        while pcm.active and generation==downlink_pacer_generation do
+            local rate=pcm.sample_rate or 8000
+            local frame_bytes=math.floor(rate*2*20/1000)
+            local frame
+            if #downlink_pending>=frame_bytes then
+                frame=downlink_pending:sub(1,frame_bytes)
+                downlink_pending=downlink_pending:sub(frame_bytes+1)
+            else
+                -- Keep a constant transport clock when the capture callback
+                -- is between blocks.  The gateway/browser can then distinguish
+                -- real silence from a missing/batched frame.
+                frame=string.rep("\0",frame_bytes)
+            end
+            if _G.relay_transport and _G.relay_transport.send_binary then
+                local sent=_G.relay_transport:send_binary(frame)
+                if sent then
+                    media_frames=media_frames+1
+                    media_bytes=media_bytes+#frame
+                    if log and (media_frames==1 or media_frames%25==0) then
+                        log.info("airsim.media","downlink_paced",media_frames,media_bytes,#downlink_pending)
+                    end
+                end
+            end
+            if sys.wait then sys.wait(20) else return end
+        end
+    end)
 end
 
 local function announce_direct_transport(reason)
@@ -422,6 +495,7 @@ start_direct_media=function(call)
         if is_dl then send_downlink(payload) end
     end)
     if log then log.info("airsim.media","start_direct",tostring(ok),tostring(err or ""),tostring(pcm.sample_rate)) end
+    if ok then start_downlink_pacer() end
     if ok and media_backend~="sip_bridge" then announce_media("media.open") end
     return ok,err
 end
@@ -494,12 +568,20 @@ local function emit_event(kind,payload)
             end
         end
     elseif kind=="call.audio_start" and payload and payload.call then
-        if media_backend~="sip_bridge" then
-            start_uplink_source(payload.call)
-        else
-            -- SIP bridge owns the entire call. Do not switch to direct PCM
-            -- after answer; that handoff causes bursty browser audio.
+        if media_backend=="sip_bridge" then
+            -- Some Air8000 firmware builds report AUDIO_START before
+            -- SPEECH_START/CONNECTED.  Treat the actual audio-start signal
+            -- as the carrier-connected boundary so the SIP early-media
+            -- dialog receives its 200/ACK and the bridge leaves negotiation.
+            local current=_G.call_service and _G.call_service.current
+            if current and (current.state=="DIALING" or current.state=="RINGING_OUT" or
+                    current.state=="CONNECTING") then
+                local promoted,err=_G.call_service:transition("connected",{source="audio_start"})
+                if log then log.info("airsim.media","audio_start_promote_connected",tostring(promoted),tostring(err or "")) end
+            end
             if sys and sys.timerStart then sys.timerStart(publish_voice_quality,250,"audio_start") end
+        else
+            start_uplink_source(payload.call)
         end
     elseif kind=="call.media" and media_backend=="carrier_rtp" then
         announce_media(payload.event=="play" and "media.early" or "media.phase")
@@ -578,7 +660,10 @@ if media_backend=="sip_bridge" and exsip then
                     rx_bad_payload=tonumber(payload.rx_bad_payload) or 0,
                     event_send_failures=tonumber(payload.event_send_failures) or 0,
                     cc_quality=cc_quality,
-                    cc_downlink_guard=ccguard.enabled==true,
+                    -- The native sip_bridge path deliberately does not call
+                    -- cc.record(); reporting the old guard state here would
+                    -- both be wrong and dereference a removed module.
+                    cc_downlink_guard=false,
                     uptime_ms=now_ms(),
                 },now_ms())
             end
@@ -801,12 +886,15 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
             sys.subscribe("IP_LOSE",function() ip_ready=false end)
         end
         local function network_ready()
-            if ip_ready then return true end
-            if socket and socket.adapter and socket.dft then
-                local ok, adapter = pcall(socket.adapter, socket.dft())
-                return ok and adapter ~= nil and adapter ~= false
-            end
-            return false
+            -- Air8000 has a cellular IP_READY before Wi-Fi DHCP completes.
+            -- The LAN relay must wait for the Wi-Fi adapter and its address,
+            -- otherwise the first WebSocket follows the wrong interface and
+            -- has to be replaced during boot.
+            if not wlan or not wlan.ready or wlan.ready()~=true then return false end
+            local ip
+            if wlan.getIP then ip=wlan.getIP() end
+            if (type(ip)~="string" or ip=="" or ip=="0.0.0.0") and wlan.getIp then ip=wlan.getIp() end
+            return type(ip)=="string" and ip~="" and ip~="0.0.0.0"
         end
         while true do
             -- The Air8000 WebSocket client must not be started during boot
@@ -895,7 +983,13 @@ if sys and sys.subscribe then
     end)
 end
 if sys and sys.timerLoopStart then
-    sys.timerLoopStart(function() publish_wifi("POLL") end,10000)
+    sys.timerLoopStart(function()
+        publish_wifi("POLL")
+        -- The Wi-Fi driver may report a transient disconnect without
+        -- restarting DHCP. Re-issue the saved connection request so the
+        -- relay loop can recover after the address returns.
+        if wlan and wlan.ready and wlan.ready()~=true then connect_saved_wifi() end
+    end,10000)
 end
 -- The modem usually has no IMEI yet when main.lua reads the identity at boot.
 -- Keep polling until it does, then publish it; registration also carries it

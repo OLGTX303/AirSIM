@@ -22,6 +22,7 @@ assert.doesNotMatch(server,/resamplePcm16/);
 assert.match(server,/fade the held/);
 assert.match(server,/const heldFrames=Math\.floor/);
 assert.match(server,/rtp_idle_frames/);
+assert.match(server,/Keep the browser's 20 ms clock alive/);
 assert.match(server,/No later packet means no sequence gap/);
 assert.match(server,/function nativePcmEnabled\(device\)/);
 assert.match(server,/const browserRate=direct \?/);

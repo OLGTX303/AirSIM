@@ -1,6 +1,9 @@
 local M = {}
 
-local RECORD_BUFFER_BYTES = 640
+-- Capture in larger blocks, then pace the transport separately.  A 640-byte
+-- buffer is too close to a single frame for some Air8000 firmware builds and
+-- causes callback timing to leak into the network stream.
+local RECORD_BUFFER_BYTES = 6400
 local MAX_PENDING_MS = 400
 
 local function quality_rate(cc)

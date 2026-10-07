@@ -162,7 +162,7 @@ ok("CC downlink guard enables firmware-safe recording for the SIP bridge", funct
   local ok,err=G.enable(cc,zb)
   assert(ok==true and err==nil)
   assert(args[1]==true and args[2]==created[1] and args[3]==created[2] and args[4]==created[3] and args[5]==created[4])
-  assert(created[1].size==6400 and created[3].size==640)
+  assert(created[1].size==6400 and created[3].size==6400)
   assert(G.buffers[1]==created[1])
   assert(G.enabled==true)
   local off

@@ -6,7 +6,7 @@ return {
     device_secret = "REPLACE_WITH_PER_DEVICE_SECRET",
     enrollment_token = "REPLACE_WITH_LAN_ENROLLMENT_TOKEN",
     ble_pairing_code = "REPLACE_WITH_6_DIGIT_PAIRING_CODE",
-    relay_url = "ws://192.168.1.91:8080/device",
+    relay_url = "ws://192.168.1.91:8081/device",
     voice_mode = "compatible", -- compatible (SIP/PCMU/8 kHz) | wideband (direct PCM)
     media_backend = "sip_bridge", -- legacy alias; voice_mode is authoritative
     voice_sample_rate = 8000, -- keep the stock direct PCM path narrowband for now

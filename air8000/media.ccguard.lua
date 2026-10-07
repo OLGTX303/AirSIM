@@ -16,9 +16,10 @@ local M = {}
 
 -- 200 ms at 16 kHz per buffer keeps the record-full message rate near 5/s.
 M.UP_BUFFER_BYTES = 6400
--- Bridge mode never writes the downlink record buffers; they only satisfy
--- the cc.record() argument contract.
-M.DOWN_BUFFER_BYTES = 640
+-- Keep the CC downlink capture buffer large enough for firmware builds that
+-- fill record buffers in bursts. The SIP bridge still emits RTP at 20 ms;
+-- this buffer is only the capture staging area and must not dictate pacing.
+M.DOWN_BUFFER_BYTES = 6400
 
 function M.enable(cc, zbuff)
     if not cc or type(cc.record) ~= "function" then return false, "cc_record_unavailable" end

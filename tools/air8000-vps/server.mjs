@@ -398,7 +398,17 @@ function resetRtpSession(session) {
 // resume allocates a fresh RTP generation.
 function releaseRtpMedia(deviceID) {
   const session=rtpSessions.get(deviceID);
-  if(session)resetRtpSession(session);
+  if(session){
+    resetRtpSession(session);
+    if(session.mediaTimer)clearInterval(session.mediaTimer);
+    session.mediaTimer=null;
+    usedRtpPorts.delete(session.port);
+    try{session.socket.close()}catch{}
+    rtpSessions.delete(deviceID);
+  }
+  // Do not let post-call playout silence inflate the next call's diagnostics.
+  // A released carrier session must start with fresh RTP counters.
+  resetMediaStats(deviceID);
 }
 function mediaFramesDue(session,key) {
   const target=Math.floor((performance.now()-session.clockStart)/MEDIA_FRAME_MS);
@@ -431,7 +441,16 @@ function playoutCarrierDownlink(session) {
   const stats=getMediaStats(session.device_id);
   const now=Date.now();
   if(!session.rxStarted){
-    if(session.rxQueue.size<session.rxWarmupFrames)return;
+    if(session.rxQueue.size<session.rxWarmupFrames){
+      // Keep the browser's 20 ms clock alive while the adaptive jitter
+      // buffer is rebuilding. Returning here makes AudioWorklet underrun;
+      // the next burst then sounds like a restart or double-layer instead
+      // of a bounded silent concealment.
+      stats.rtp_idle_frames++;
+      const peer=mediaPeers.get(session.device_id);
+      if(peer?.readyState===1)peer.send(SILENT_PCMU_FRAME,{binary:true});
+      return;
+    }
     session.rxStarted=true;
   }
   if(session.rxExpected===null)return;

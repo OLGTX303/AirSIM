@@ -102,13 +102,13 @@ Air8000 on the same LAN, then run:
 Open the printed dashboard URL and set the device transport to:
 
 ```text
-ws://WINDOWS_PC_LAN_IP:8080/device
+ws://WINDOWS_PC_LAN_IP:8081/device
 ```
 
 In `air8000/config.lua`, set the same LAN address before flashing:
 
 ```lua
-relay_url = "ws://192.168.1.50:8080/device"
+relay_url = "ws://192.168.1.50:8081/device"
 ```
 
 For LAN mode, keep `device_secret` equal to the secret entered into
