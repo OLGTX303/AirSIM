@@ -120,6 +120,15 @@ function getMediaStats(deviceID) {
   if(!stats)stats=resetMediaStats(deviceID);
   return stats;
 }
+function beginCallMediaStats(deviceID) {
+  const stats=resetMediaStats(deviceID);
+  const device=devices.get(deviceID);
+  if(device){
+    device.voip_stats=null;
+    device.cc_downlink_guard=null;
+  }
+  return stats;
+}
 function firstLanIPv4() {
   for(const entries of Object.values(os.networkInterfaces())){
     for(const item of entries||[]){
@@ -348,7 +357,10 @@ const sipServer = new SipUdpServer({
   },
   onState(event) {
     if (event.type === "dial" || event.type === "resume" || event.type === "progress" || event.type === "connected" || event.type === "ended" || event.type === "failed") {
-      console.log(`SIP call ${event.type} device=${event.device_id}`);
+      const detail=event.type === "failed"
+        ? ` code=${event.failure_code || event.code || "unknown"} reason=${String(event.failure_reason || event.reason || "unknown").replace(/[\r\n]+/g," ")}`
+        : "";
+      console.log(`SIP call ${event.type} device=${event.device_id}${detail}`);
     }
     if (event.type === "failed" || event.type === "ended") {
       // Native carrier failure/remote release is authoritative. Ensure the
@@ -407,16 +419,11 @@ function releaseRtpMedia(deviceID) {
     try{session.socket.close()}catch{}
     rtpSessions.delete(deviceID);
   }
-  // Do not let post-call playout silence inflate the next call's diagnostics.
-  // A released carrier session must start with fresh RTP counters.
-  resetMediaStats(deviceID);
+  // Keep the completed call's counters visible in the dashboard. The next
+  // media ticket or dial resets them before a new call starts, so this does
+  // not leak stale counters into the next session.
   const device=devices.get(deviceID);
   if(device){
-    // VoIP counters are scoped to one native bridge instance. Keeping the
-    // last report after the RTP socket is released makes the dashboard show
-    // stale "device sends" while the bridge is actually stopped.
-    device.voip_stats=null;
-    device.cc_downlink_guard=null;
     device.rtp_ready=false;
   }
 }
@@ -653,7 +660,7 @@ const server=http.createServer(async (req,res)=>{
       const id=decodeURIComponent(mediaMatch[1]);
       const d=devices.get(id);
       if(!d?.socket || d.socket.readyState!==1)return json(res,409,{error:"device offline"});
-      resetMediaStats(id);
+      beginCallMediaStats(id);
       if(rtpMediaEnabled(d)){
         const session=await ensureRtpSession(id);
         if(carrierRtpEnabled(d)){
@@ -700,6 +707,7 @@ const server=http.createServer(async (req,res)=>{
       const d=devices.get(id);
       if(value.type==="dial" && sipBridgeEnabled(d)){
         try {
+          beginCallMediaStats(id);
           const session=await ensureRtpSession(id);
           resetRtpSession(session);
           const result=await sipServer.invite(d,value.payload?.number,session);
@@ -893,6 +901,9 @@ mediaWss.on("connection",(ws,deviceID)=>{
       if (msg.type === "call.state") {
         const event=String(msg.payload?.event||"");
         const call=msg.payload?.call;
+        if (event === "failed" || event === "hangup" || event === "remote_hangup" || event === "disconnected") {
+          console.log(`Air8000 call state device=${device.device_id} event=${event} state=${String(call?.state || "unknown")} data=${JSON.stringify(msg.payload?.data || {})}`);
+        }
         const ended=["ended","failed","hangup","reject","remote_hangup","disconnected"].includes(event);
         device.status={...(device.status||{}),active_call:ended?null:(call||device.status?.active_call||null)};
         if(ended){
