@@ -11,6 +11,7 @@ local relay_module=require("transport.relay")
 local reconnect=require("transport.reconnect")
 local gnss_module=require("gnss.gnss_service")
 local wifi_status=require("system.wifi_status")
+local status_led_module=require("status.led")
 local call_module=require("cellular.call")
 local sms_module=require("cellular.sms")
 local pcm_module=require("media.direct_pcm")
@@ -71,6 +72,7 @@ end
 local device_identity=identity.read(mobile,mcu,cfg)
 local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.voice_mode=cfg.voice_mode; status.stock_firmware_voice_supported=caps.stock_firmware_voice_supported; status.media_backend=media_backend; status.real_early_media=media_backend=="sip_bridge"; status.target_cellular_voice_rate=media_backend=="sip_bridge" and 8000 or nil; status.wideband_volte=false; status.media_transport=media_backend=="sip_bridge" and "sip_rtp" or "direct_pcm"; status.media_rate=8000; status.media_uplink_rate=8000
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
+local status_led=status_led_module.new(cfg.status_led)
 
 local function now_ms()
     return os.time()*1000
@@ -80,6 +82,7 @@ local function wifi_snapshot(event,data)
     local snap=wifi_status.snapshot(wlan,cfg,wifi_cache,event,data,now_ms())
     status.wifi_state=snap.state
     status.wifi=snap
+    status_led:set_wifi(snap.connected==true)
     return snap
 end
 
@@ -92,6 +95,7 @@ end
 
 if wlan and wlan.init then pcall(wlan.init) end
 wifi_snapshot("BOOT")
+status_led:update_cellular(mobile)
 local function connect_saved_wifi()
     if not wlan or type(wlan.connect)~="function" or not cfg.wifi or
        type(cfg.wifi.ssid)~="string" or cfg.wifi.ssid=="" then return false end
@@ -997,6 +1001,7 @@ end
 if sys and sys.timerLoopStart then
     sys.timerLoopStart(function()
         publish_wifi("POLL")
+        status_led:update_cellular(mobile)
         -- The Wi-Fi driver may report a transient disconnect without
         -- restarting DHCP. Re-issue the saved connection request so the
         -- relay loop can recover after the address returns.

@@ -14,6 +14,9 @@ return {
     location_policy = "on_request",
     location_period_ms = 60000,
     wifi = { ssid = "REPLACE_WIFI_SSID", password = "REPLACE_WIFI_PASSWORD" },
+    -- Air8000 dev-board network LED is GPIO146; GPIO20 is the core-board LED.
+    -- Change either pin to nil when that LED is not fitted on your board.
+    status_led = { wifi_gpio = 146, cellular_gpio = 20, active_high = true },
     limits = { max_message_bytes = 65536, max_sms_body = 4096, nonce_ttl_ms = 300000 },
     sip = { enabled = true, sip_server_addr = "192.168.1.91", sip_server_port = 5060,
         sip_domain = "airsim.local", sip_username = "air8000-lan-e3ae10e4",

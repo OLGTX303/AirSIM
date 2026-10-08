@@ -13,6 +13,9 @@ return {
     location_policy = "on_request", -- off | on_request | periodic
     location_period_ms = 60000,
     wifi = { ssid = "REPLACE_WIFI_SSID", password = "REPLACE_WIFI_PASSWORD" },
+    -- Air8000 dev-board network LED is GPIO146; GPIO20 is the core-board LED.
+    -- Set a pin to nil when that LED is not fitted on the board.
+    status_led = { wifi_gpio = 146, cellular_gpio = 20, active_high = true },
     limits = { max_message_bytes = 65536, max_sms_body = 4096, nonce_ttl_ms = 300000 },
     -- Compatible mode uses the stock exSIP SIP/UDP bridge and PCMU/8 kHz.
     sip = {
