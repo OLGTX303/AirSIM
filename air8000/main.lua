@@ -645,13 +645,16 @@ if media_backend=="sip_bridge" and exsip then
                 pcall(exsip.fail,400,"Missing cellular destination")
                 return
             end
-            local ok,err=_G.call_service:dial(payload.call_id or tostring(os.time()),number)
-            if ok then
-                -- Open SIP early media before the cellular leg answers.
-                pcall(exsip.progress)
-            else
-                pcall(exsip.fail,486,tostring(err or "Cellular line busy"))
+            -- Establish SIP 183/SDP before dialing the cellular leg.  The
+            -- carrier's ringback/early-media PCM then has an active RTP
+            -- destination immediately; dialing first loses that early media.
+            local progress_ok,progress_result=pcall(exsip.progress)
+            if not progress_ok or progress_result==false then
+                pcall(exsip.fail,500,"early_media_failed")
+                return
             end
+            local ok,err=_G.call_service:dial(payload.call_id or tostring(os.time()),number)
+            if not ok then pcall(exsip.fail,486,tostring(err or "Cellular line busy")) end
         elseif event_type=="media" and action=="ready" then
             media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"sip_media_ready")
             announce_media("media.open")
