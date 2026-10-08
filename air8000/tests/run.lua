@@ -277,6 +277,8 @@ ok("IMEI is retried until the modem reports a real value", function()
   assert(st.imei=="866123456789012","status must carry imei for device.register")
   local w=device.status({},id,{model="Air8000W_A17"})
   assert(w.device_type=="air8000w" and w.hardware_model=="Air8000W","W registration identity must not be hard-coded as A")
+  local profile_src=assert(io.open("system.mod.lua","r")):read("*a")
+  assert(profile_src:find("M.has_es8311=false",1,true),"Air8000 bridge profile must not require ES8311")
   local fp=assert(io.open("main.lua","r")); local src=fp:read("*a"); fp:close()
   assert(src:find('identity.imei(mobile)',1,true) and src:find('"device.identity"',1,true))
   for _,pair in ipairs({{"cellular/identity.lua","cellular.identity.lua"},{"protocol/device.lua","protocol.device.lua"},{"gnss/gnss_service.lua","gnss.gnss_service.lua"}}) do

@@ -20,10 +20,10 @@ M.raw_model=raw
 M.model=raw
 M.is_air8000a=model:find("air8000a",1,true)~=nil and model:find("air8000w",1,true)==nil
 M.is_air8000w=model:find("air8000w",1,true)~=nil
--- Air8000W removes GNSS, not the audio path.  Audio codec presence is a
--- board capability shared by the A/W designs; do not infer it from GNSS.
+-- The Air8000 A/W bridge hardware has no ES8311 codec.  SIP/CC bridge audio
+-- is handled by the modem/VoIP bridge; only GNSS is A-module-specific here.
 M.has_gnss=M.is_air8000a
-M.has_es8311=M.is_air8000a or M.is_air8000w
-M.has_local_audio=M.has_es8311
+M.has_es8311=false
+M.has_local_audio=false
 M.a_only_features={gnss=M.has_gnss,es8311=M.has_es8311,local_audio=M.has_local_audio}
 return M

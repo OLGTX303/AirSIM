@@ -18,11 +18,6 @@ local carrier_rtp_module=require("media.carrier_rtp")
 local media_manager=require("media.media_manager")
 local media_phase_module=require("media.phase")
 local ccguard=require("media.ccguard")
-local exaudio=nil
-do
-    local ok,module=pcall(require,"exaudio")
-    if ok and type(module)=="table" then exaudio=module end
-end
 local exsip=nil
 do
     local ok,module=pcall(require,"exsip")
@@ -341,41 +336,8 @@ local function init_cc_backend()
     return false,"cc_init_unavailable"
 end
 
-local function init_audio_hardware()
-    if not module_profile.has_es8311 then
-        return false,"audio_codec_not_declared"
-    end
-    if not exaudio or type(exaudio.setup)~="function" then
-        return false,"exaudio_unavailable"
-    end
-    -- Match module/Air8000/demo/sip_cc_bridge/audio_drv.lua.  The bridge
-    -- still needs the ES8311/I2S driver initialized before CC and VoIP start;
-    -- this is separate from exsip's AUDIO_MODE_BRIDGE selection.
-    local ok,result=pcall(exaudio.setup,{
-        model="es8311",
-        i2c_id=0,
-        pa_ctrl=162,
-        dac_ctrl=164,
-        dac_delay=6,
-        pa_delay=100,
-        dac_time_delay=100,
-        bits_per_sample=16,
-        pa_on_level=1,
-        audio_mode="new",
-    })
-    if not ok or result==false then
-        return false,ok and "exaudio_setup_failed" or tostring(result)
-    end
-    if type(exaudio.vol)=="function" then pcall(exaudio.vol,70) end
-    if type(exaudio.mic_vol)=="function" then pcall(exaudio.mic_vol,96) end
-    if log then log.info("airsim.media","audio_hardware","es8311","audio_mode","new") end
-    return true
-end
-
--- Air8000W Audio V2 initialization may yield inside exaudio.setup().  Keep
--- audio, CC, and SIP startup inside a LuatOS coroutine; calling setup() from
--- the main chunk raises "attempt to yield from outside a coroutine" and
--- leaves SIP waiting forever for the network/backend to finish booting.
+-- The no-codec Air8000 bridge demo does not initialize exaudio/ES8311.  Keep
+-- SIP and CC startup in a task so the network adapter is ready first.
 local function wifi_network_ready()
     if not wlan or not wlan.ready or wlan.ready()~=true then return false end
     local ip
@@ -399,8 +361,7 @@ local function wait_for_sip_network()
 end
 
 local function start_device_backends()
-    local audio_ok,audio_err=init_audio_hardware()
-    if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
+    if log then log.info("airsim.media","audio_init","skipped_native_cc_voip_bridge") end
     -- exsip locks its network adapter when start() is called.  Starting it
     -- before Wi-Fi DHCP completes leaves the SIP task waiting forever for an
     -- IP_READY event belonging to the wrong adapter.
