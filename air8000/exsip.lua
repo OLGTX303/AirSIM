@@ -387,11 +387,6 @@ local function start_voip_engine_now(session)
         log_error("voip core not support")
         return
     end
-    -- 唤醒音频硬件（audio_v2 框架下 ES8311 可能处于 shutdown，需先恢复）
-    if exaudio.pm then
-        pcall(exaudio.pm, exaudio.RESUME)
-    end
-
     local codec_map = {
         [exsip.CODEC_PCMU] = voip.PCMU,
         [exsip.CODEC_PCMA] = voip.PCMA
@@ -401,6 +396,11 @@ local function start_voip_engine_now(session)
     -- 普通SIP可自动选择C层直接硬件或Lua Audio V2 PCM bridge；CC-SIP桥接
     -- 必须由CC C层独占音频硬件，不能再启动本地SIP speech。
     local is_cc_sip_bridge = g_config and g_config.cc_sip_bridge == true
+    -- The no-codec Air8000 bridge owns audio in the CC/VoIP firmware. Do not
+    -- touch local exaudio/codec power state before starting native bridge media.
+    if not is_cc_sip_bridge and exaudio.pm then
+        pcall(exaudio.pm, exaudio.RESUME)
+    end
     local bsp = rtos and rtos.bsp and rtos.bsp()
     local model = hmeta and hmeta.model and hmeta.model()
     local platform = type(bsp) == "string" and bsp or model
