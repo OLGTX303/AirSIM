@@ -133,59 +133,12 @@ local media_phase=media_phase_module.new(function(next_state,previous,reason)
 end)
 status.media_phase=media_phase_module.IDLE
 
-local bridge_tone_active=false
-local bridge_tone_generation=0
-
 local function set_bridge_tone(enabled,reason)
-    -- cc.bridgeTone() is the native CC/VoIP bridge ringback path; it does not
-    -- require a local ES8311 codec. Keep it available on Air8000W as in the
-    -- working 9b7f2ec path, and stop it as soon as speech connects.
-    if media_backend~="sip_bridge" then enabled=false end
-    bridge_tone_generation=bridge_tone_generation+1
-    local generation=bridge_tone_generation
-
-    local function apply()
-        if generation~=bridge_tone_generation then return false end
-        if enabled then
-            -- The retry task can outlive the 183 phase; never start ringback
-            -- once the cellular leg is carrying speech.
-            local current=_G.call_service and _G.call_service.current
-            if not current or tostring(current.state or "")=="CONNECTED" then return true end
-        end
-        local applied=false
-        if cc and type(cc.bridgeTone)=="function" then
-            local ok,result=pcall(cc.bridgeTone,enabled)
-            applied=ok and result~=false
-        elseif voip and type(voip.bridgeTone)=="function" then
-            local ok,result=pcall(voip.bridgeTone,enabled)
-            applied=ok and result~=false
-        end
-        if applied then
-            bridge_tone_active=enabled
-            if log then log.info("airsim.media","bridge_ringback",enabled and "on" or "off",tostring(reason or "")) end
-        end
-        return applied
-    end
-
-    if not enabled then
-        apply()
-        return true
-    end
-
-    -- cc.bridgeTone() only starts after the VoIP RTP engine is RUNNING. 183
-    -- media-ready can arrive a few milliseconds earlier, so retry briefly.
-    if sys and sys.taskInit then
-        sys.taskInit(function()
-            for _=1,20 do
-                if generation~=bridge_tone_generation then return end
-                if apply() then return end
-                if sys.wait then sys.wait(50) end
-            end
-            if log then log.warn("airsim.media","bridge_ringback_start_timeout") end
-        end)
-        return true
-    end
-    return apply()
+    -- The official classic sip_cc_bridge demo leaves carrier early media
+    -- untouched. Calling cc.bridgeTone() here competes with the native
+    -- CC<->VoIP bridge and produces duplicate/gapped audio on Air8000W.
+    if media_backend=="sip_bridge" then return true end
+    return false
 end
 
 local function disable_bridge_tone(reason)
