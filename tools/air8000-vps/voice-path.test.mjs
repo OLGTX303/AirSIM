@@ -38,7 +38,7 @@ assert.match(server,/uplink_peak/);
 assert.match(server,/rxWarmupFrames:24/);
 assert.match(server,/rxMissingGraceMs:80/);
 assert.match(server,/targetDelayMs:800/);
-assert.match(server,/session\.targetDelayMs=Math\.max\(480/);
+assert.match(server,/session\.targetDelayMs=Math\.max\(240/);
 assert.match(server,/rxHoldMs:2000/);
 assert.match(server,/rxMissingSince/);
 assert.match(server,/sipServer\.hangup\(event\.device_id\)/);
