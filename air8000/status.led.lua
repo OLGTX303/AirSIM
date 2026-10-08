@@ -14,18 +14,21 @@ end
 function M.new(cfg)
     cfg=type(cfg)=="table" and cfg or {}
     local active_high=cfg.active_high~=false
-    local pins={wifi=tonumber(cfg.wifi_gpio),cellular=tonumber(cfg.cellular_gpio)}
+    local pins={
+        wifi=tonumber(cfg.wifi_gpio or 146),
+        cellular=tonumber(cfg.cellular_gpio or 20),
+    }
     local setters={}
     local state={wifi=false,cellular=false}
 
     local function setup(name,pin)
-        if not pin or not gpio or type(gpio.setup)~="function" then return end
-        local ok,setter=pcall(gpio.setup,pin,pin_value(active_high,false))
-        if ok and type(setter)=="function" then
-            setters[name]=setter
-            pcall(setter,pin_value(active_high,false))
-        elseif ok and gpio.set then
-            setters[name]=function(value) return gpio.set(pin,value) end
+        if not pin or not gpio or type(gpio.setup)~="function" then
+            if log then log.warn("airsim.led","unavailable",name,"gpio",tostring(pin)) end
+            return
+        end
+        local ok=pcall(gpio.setup,pin,pin_value(active_high,false))
+        setters[name]=function(value)
+            return pcall(gpio.setup,pin,value)
         end
         if log then log.info("airsim.led","init",name,"gpio",pin,"ok",ok) end
     end
@@ -49,12 +52,13 @@ function M.new(cfg)
         local registered=false
         if mobile then
             local ok,value=pcall(function()
-                if type(mobile.getState)=="function" then return mobile.getState() end
                 if type(mobile.status)=="function" then return mobile.status() end
+                if type(mobile.getState)=="function" then return mobile.getState() end
             end)
             if ok then
                 local text=tostring(value or "")
                 registered=text=="REGISTERED" or text=="REGISTERED_ROAMING" or
+                    value==mobile.REGISTERED or value==mobile.REGISTERED_ROAMING or
                     text==tostring(mobile.REGISTERED) or text==tostring(mobile.REGISTERED_ROAMING)
             end
         end
