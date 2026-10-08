@@ -137,10 +137,10 @@ local bridge_tone_active=false
 local bridge_tone_generation=0
 
 local function set_bridge_tone(enabled,reason)
-    -- Air8000W has no local codec and follows the official bridge_pcm
-    -- guidance: carrier early media is authoritative, so do not inject a
-    -- synthetic bridge tone that can overlap the modem's PLAY stream.
-    if media_backend~="sip_bridge" or module_profile.is_air8000w then enabled=false end
+    -- cc.bridgeTone() is the native CC/VoIP bridge ringback path; it does not
+    -- require a local ES8311 codec. Keep it available on Air8000W as in the
+    -- working 9b7f2ec path, and stop it as soon as speech connects.
+    if media_backend~="sip_bridge" then enabled=false end
     bridge_tone_generation=bridge_tone_generation+1
     local generation=bridge_tone_generation
 
@@ -661,9 +661,9 @@ if media_backend=="sip_bridge" and exsip then
             -- A gateway resume re-opens SIP media on an already CONNECTED
             -- cellular call. Ringback must never be mixed into live speech.
             local current=_G.call_service and _G.call_service.current
-            -- bridgeTone was requested at the cellular dial boundary; do not
-            -- restart it when the SIP RTP session becomes ready.
-            if not current or tostring(current.state or "")=="CONNECTED" then
+            if current and tostring(current.state or "")~="CONNECTED" then
+                set_bridge_tone(true,"sip_media_ready")
+            else
                 disable_bridge_tone("sip_media_ready_connected")
             end
         elseif event_type=="media" and action=="stop" then
@@ -694,8 +694,10 @@ if media_backend=="sip_bridge" and exsip then
                 },now_ms())
             end
         elseif event_type=="voip" and action=="state" and tostring(payload)=="started" then
-            -- No bridgeTone call here: the official demo starts it after
-            -- cc.dial(), and repeating it at VoIP start can layer ringback.
+            if _G.call_service and _G.call_service.current and
+               _G.call_service.current.state~="CONNECTED" then
+                set_bridge_tone(true,"voip_started")
+            end
         elseif event_type=="call" and (action=="ended" or action=="failed") then
             -- During a gateway-instance refresh the SIP dialog is intentionally
             -- replaced while the cellular call remains alive.
