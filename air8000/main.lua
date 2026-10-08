@@ -20,7 +20,7 @@ local media_manager=require("media.media_manager")
 local media_phase_module=require("media.phase")
 local ccguard=require("media.ccguard")
 local exaudio=nil
-do
+if cfg.external_audio==true then
     local ok,module=pcall(require,"exaudio")
     if ok and type(module)=="table" then exaudio=module end
 end
@@ -358,7 +358,13 @@ local function init_audio_hardware()
     return true
 end
 
-local audio_ok,audio_err=init_audio_hardware()
+-- Air8000A/W voice uses the modem/VoLTE audio path.  Do not probe I2C0 or
+-- initialize an ES8311 unless a board-specific configuration explicitly
+-- enables an externally fitted codec.
+local audio_ok,audio_err=false,"external_audio_disabled"
+if cfg.external_audio==true then
+    audio_ok,audio_err=init_audio_hardware()
+end
 if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
 init_cc_backend()
 

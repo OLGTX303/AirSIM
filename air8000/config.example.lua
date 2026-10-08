@@ -8,6 +8,7 @@ return {
     relay_url = "wss://relay.example.invalid/v1/devices/air8000",
     voice_mode = "compatible", -- compatible | wideband; select before a call
     media_backend = "sip_bridge", -- legacy alias for voice_mode
+    external_audio = false, -- enable only for a board with a verified external ES8311
     voice_sample_rate = 8000, -- 8000 now; raise to 16000 only after a dedicated test
     carrier_rtp = { enabled = false }, -- legacy optional path only
     location_policy = "on_request", -- off | on_request | periodic

@@ -9,6 +9,7 @@ return {
     relay_url = "ws://192.168.1.91:8081/device",
     voice_mode = "compatible", -- compatible (SIP/PCMU/8 kHz) | wideband (direct PCM)
     media_backend = "sip_bridge", -- legacy alias; voice_mode is authoritative
+    external_audio = false, -- Air8000A/W uses the modem audio path; no ES8311 by default
     voice_sample_rate = 8000, -- keep the stock direct PCM path narrowband for now
     carrier_rtp = { enabled = false }, -- legacy optional path, never selected by default
     location_policy = "on_request",
