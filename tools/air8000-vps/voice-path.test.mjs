@@ -8,6 +8,7 @@ assert.match(server,/setInterval\(\(\)=>pumpCarrierMedia\(session\),10\)/);
 assert.match(server,/performance\.now\(\)-session\.clockStart/);
 assert.match(server,/mediaFramesDue\(session,"rxClock"\)/);
 assert.match(server,/mediaFramesDue\(session,"txClock"\)/);
+assert.match(server,/rxWarmupFrames=Math\.max\(12,Math\.min\(24/);
 assert.match(server,/Never burst several audio frames/);
 assert.match(server,/MEDIA_MAX_CATCHUP_FRAMES/);
 assert.match(server,/rtp_jitter_ms/);

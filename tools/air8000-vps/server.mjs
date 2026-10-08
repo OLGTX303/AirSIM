@@ -290,8 +290,11 @@ async function ensureRtpSession(deviceID) {
         // WebRTC-style adaptive jitter target: keep a bounded cushion above
         // the measured network variation, but never let the startup buffer
         // consume the entire latency budget.
-        session.targetDelayMs=Math.max(480,Math.min(1200,Math.ceil((session.jitterMs*4+160)/20)*20));
-        session.rxWarmupFrames=Math.max(24,Math.min(60,Math.ceil(session.targetDelayMs/20)));
+        session.targetDelayMs=Math.max(240,Math.min(480,Math.ceil((session.jitterMs*4+160)/20)*20));
+        // Do not require more queued packets than a short call may deliver.
+        // At 4-15 packets/s the old 24-60 frame target could wait forever,
+        // leaving browser downlink_frames at zero even though RTP arrived.
+        session.rxWarmupFrames=Math.max(12,Math.min(24,Math.ceil(session.targetDelayMs/20)));
       }
     }
     session.lastArrivalMs=now;
