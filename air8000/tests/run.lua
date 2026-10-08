@@ -272,8 +272,11 @@ ok("IMEI is retried until the modem reports a real value", function()
   local id=I.read({imei=function() return "866123456789012" end},nil,{serial_number="SN1"})
   assert(id.imei=="866123456789012" and id.serial_number=="SN1")
   package.loaded["protocol.device"]=nil
-  local st=require("protocol.device").status({},id)
+  local device=require("protocol.device")
+  local st=device.status({},id)
   assert(st.imei=="866123456789012","status must carry imei for device.register")
+  local w=device.status({},id,{model="Air8000W_A17"})
+  assert(w.device_type=="air8000w" and w.hardware_model=="Air8000W","W registration identity must not be hard-coded as A")
   local fp=assert(io.open("main.lua","r")); local src=fp:read("*a"); fp:close()
   assert(src:find('identity.imei(mobile)',1,true) and src:find('"device.identity"',1,true))
   for _,pair in ipairs({{"cellular/identity.lua","cellular.identity.lua"},{"protocol/device.lua","protocol.device.lua"},{"gnss/gnss_service.lua","gnss.gnss_service.lua"}}) do

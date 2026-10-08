@@ -2,9 +2,10 @@ local M = {}
 function M.status(capabilities, identity, profile)
     identity = identity or {}
     profile=profile or {}
-    -- Keep the wire identity compatible with the existing AirSIM gateway;
-    -- expose the physical variant separately as module_model.
-    return { device_type="air8000a", hardware_model="Air8000A",
+    local model=string.lower(tostring(profile.model or ""))
+    local is_w=model:find("air8000w",1,true)~=nil
+    return { device_type=is_w and "air8000w" or "air8000a",
+        hardware_model=is_w and "Air8000W" or "Air8000A",
         module_model=profile.model, serial_number=identity.serial_number, imei=identity.imei,
         capabilities=capabilities or {},
         online=true, sim_ready=false, network_registered=false, volte_ready=false, relay_connected=false,
