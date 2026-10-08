@@ -343,7 +343,7 @@ end
 
 local function init_audio_hardware()
     if not module_profile.has_es8311 then
-        return false,"unsupported_module"
+        return false,"audio_codec_not_declared"
     end
     if not exaudio or type(exaudio.setup)~="function" then
         return false,"exaudio_unavailable"
