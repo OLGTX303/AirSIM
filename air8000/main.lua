@@ -292,21 +292,18 @@ local function init_cc_backend()
             -- roughly 200 ms bursts (the observed ~4.6 packets/s symptom).
             status.cc_downlink_guard=false
             if log then log.info("airsim.media","cc_downlink_guard","disabled","native_sip_bridge") end
-            -- Match the official sip_cc_bridge demo: configure and start the
-            -- SIP/VoIP bridge before initializing CC.  Initializing CC first
-            -- lets the modem briefly select its default audio route; when
-            -- exsip later switches to AUDIO_MODE_BRIDGE, that route change
-            -- can leave the carrier leg delivering bursty/empty RTP.
+            -- Keep the working demo order: initialize CC before starting the
+            -- SIP task.  The modem must have its CC session ready before an
+            -- incoming SIP INVITE can request cc.dial().
+            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
+            local init_ok,init_result=pcall(cc.init,0)
+            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
+            if not init_ok or init_result==false then
+                return false,"cc_init_failed"
+            end
             local start_ok,start_result=pcall(exsip.start)
             if log then log.info("airsim.sip","start",tostring(start_ok and start_result)) end
             if not start_ok or start_result==false then return false,"exsip_start_failed" end
-            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
-            local init_ok,init_result=pcall(cc.init,0)
-            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge_after_sip") end
-            if not init_ok or init_result==false then
-                pcall(exsip.stop)
-                return false,"cc_init_failed"
-            end
             return true
         end
     end
