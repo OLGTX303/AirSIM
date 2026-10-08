@@ -18,6 +18,11 @@ local carrier_rtp_module=require("media.carrier_rtp")
 local media_manager=require("media.media_manager")
 local media_phase_module=require("media.phase")
 local ccguard=require("media.ccguard")
+local exaudio=nil
+do
+    local ok,module=pcall(require,"exaudio")
+    if ok and type(module)=="table" then exaudio=module end
+end
 local exsip=nil
 do
     local ok,module=pcall(require,"exsip")
@@ -32,15 +37,12 @@ if fskv then
     }
 end
 if kv_api then cfg=settings.load(kv_api,cfg) end
-local gnss_api=nil
-if module_profile.has_gnss then
-    gnss_api=_G.exgnss
-    if not gnss_api then
-        local ok,module=pcall(require,"exgnss")
-        if ok and module then gnss_api=module; _G.exgnss=module end
-    end
-    if not gnss_api then gnss_api=libgnss end
+local gnss_api=_G.exgnss
+if module_profile.has_gnss and not gnss_api then
+    local ok,module=pcall(require,"exgnss")
+    if ok and module then gnss_api=module; _G.exgnss=module end
 end
+if module_profile.has_gnss and not gnss_api then gnss_api=libgnss end
 local sip_cfg=type(cfg.sip)=="table" and cfg.sip or {}
 local function real_value(value)
     return type(value)=="string" and value~="" and not value:match("^REPLACE") and value~="example.invalid"
@@ -57,7 +59,7 @@ end
 -- even when an older persisted config left sip.enabled=false.
 if cfg.voice_mode=="compatible" and exsip then sip_cfg.enabled=true end
 local requested_media_backend=cfg.voice_mode=="wideband" and "direct_pcm" or "sip_bridge"
-local caps=capability.probe({cc=cc,sms=sms,gnss=gnss_api,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsip,audio_v2=audio_v2,voip=voip})
+local caps=capability.probe({cc=cc,sms=sms,gnss=module_profile.has_gnss and gnss_api or nil,wlan=wlan,websocket=websocket,crypto=crypto,fskv=fskv,fota=fota,sip=exsip,audio_v2=audio_v2,voip=voip})
 local media_backend=media_manager.select(requested_media_backend,caps,sip_cfg.enabled==true)
 if log then
     log.info("airsim.media","selection",cfg.voice_mode,requested_media_backend,tostring(media_backend or "none"),
@@ -67,7 +69,7 @@ if log then
         "sip_enabled",tostring(sip_cfg.enabled==true),"exsip",tostring(exsip~=nil))
 end
 local device_identity=identity.read(mobile,mcu,cfg)
-local status=device.status(caps,device_identity,module_profile); status.firmware=tostring(_G.VERSION or VERSION); status.voice_mode=cfg.voice_mode; status.stock_firmware_voice_supported=caps.stock_firmware_voice_supported; status.media_backend=media_backend; status.real_early_media=media_backend=="sip_bridge"; status.target_cellular_voice_rate=media_backend=="sip_bridge" and 8000 or nil; status.wideband_volte=false; status.media_transport=media_backend=="sip_bridge" and "sip_rtp" or "direct_pcm"; status.media_rate=8000; status.media_uplink_rate=8000; status.air8000a_features=module_profile.a_only_features
+local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.voice_mode=cfg.voice_mode; status.stock_firmware_voice_supported=caps.stock_firmware_voice_supported; status.media_backend=media_backend; status.real_early_media=media_backend=="sip_bridge"; status.target_cellular_voice_rate=media_backend=="sip_bridge" and 8000 or nil; status.wideband_volte=false; status.media_transport=media_backend=="sip_bridge" and "sip_rtp" or "direct_pcm"; status.media_rate=8000; status.media_uplink_rate=8000
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
 
 local function now_ms()
@@ -92,8 +94,7 @@ if wlan and wlan.init then pcall(wlan.init) end
 wifi_snapshot("BOOT")
 local function connect_saved_wifi()
     if not wlan or type(wlan.connect)~="function" or not cfg.wifi or
-       type(cfg.wifi.ssid)~="string" or cfg.wifi.ssid=="" or
-       cfg.wifi.ssid:match("^REPLACE_") then return false end
+       type(cfg.wifi.ssid)~="string" or cfg.wifi.ssid=="" then return false end
     if wlan.ready and wlan.ready()==true then return true end
     local stored_bssid=cfg.wifi.bssid
     local bssid=type(stored_bssid)=="string" and stored_bssid:match("^[%da-fA-F]+$") and
@@ -105,13 +106,9 @@ local function connect_saved_wifi()
     return ok
 end
 if sys and sys.timerStart then sys.timerStart(connect_saved_wifi,1000) end
--- Keep BLE provisioning discoverable during first boot.  An unset pairing
--- code makes the service read-only; it must never silently disable the
--- advertisement, otherwise there is no way to discover the device and fix
--- its provisioning configuration.
-if cfg.ble_enabled ~= false then
+if cfg.ble_pairing_code and cfg.ble_pairing_code ~= "REPLACE_WITH_6_DIGIT_PAIRING_CODE" then
     local ok,err=ble_prov.start(cfg,device_identity,wlan,kv_api)
-    if log then log.info("airsim.ble","start",tostring(ok),tostring(err or ""),ble_prov.SERVICE_UUID) end
+    if not ok and log then log.warn("airsim.ble",err) end
 end
 local pcm=pcm_module.new(cc,nil,nil)
 _G.AIRSIM_VOICE_RATE=tonumber(cfg.voice_sample_rate) or 8000
@@ -133,12 +130,56 @@ local media_phase=media_phase_module.new(function(next_state,previous,reason)
 end)
 status.media_phase=media_phase_module.IDLE
 
+local bridge_tone_active=false
+local bridge_tone_generation=0
+
 local function set_bridge_tone(enabled,reason)
-    -- The official classic sip_cc_bridge demo leaves carrier early media
-    -- untouched. Calling cc.bridgeTone() here competes with the native
-    -- CC<->VoIP bridge and produces duplicate/gapped audio on Air8000W.
-    if media_backend=="sip_bridge" then return true end
-    return false
+    if media_backend~="sip_bridge" then enabled=false end
+    bridge_tone_generation=bridge_tone_generation+1
+    local generation=bridge_tone_generation
+
+    local function apply()
+        if generation~=bridge_tone_generation then return false end
+        if enabled then
+            -- The retry task can outlive the 183 phase; never start ringback
+            -- once the cellular leg is carrying speech.
+            local current=_G.call_service and _G.call_service.current
+            if not current or tostring(current.state or "")=="CONNECTED" then return true end
+        end
+        local applied=false
+        if cc and type(cc.bridgeTone)=="function" then
+            local ok,result=pcall(cc.bridgeTone,enabled)
+            applied=ok and result~=false
+        elseif voip and type(voip.bridgeTone)=="function" then
+            local ok,result=pcall(voip.bridgeTone,enabled)
+            applied=ok and result~=false
+        end
+        if applied then
+            bridge_tone_active=enabled
+            if log then log.info("airsim.media","bridge_ringback",enabled and "on" or "off",tostring(reason or "")) end
+        end
+        return applied
+    end
+
+    if not enabled then
+        apply()
+        return true
+    end
+
+    -- cc.bridgeTone() only starts after the VoIP RTP engine is RUNNING. 183
+    -- media-ready can arrive a few milliseconds earlier, so retry briefly.
+    if sys and sys.taskInit then
+        sys.taskInit(function()
+            for _=1,20 do
+                if generation~=bridge_tone_generation then return end
+                if apply() then return end
+                if sys.wait then sys.wait(50) end
+            end
+            if log then log.warn("airsim.media","bridge_ringback_start_timeout") end
+        end)
+        return true
+    end
+    return apply()
 end
 
 local function disable_bridge_tone(reason)
@@ -239,28 +280,19 @@ local function init_cc_backend()
                 return false,bridge_err
             end
         else
+            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
+            local init_ok,init_result=pcall(cc.init,0)
+            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
+            if not init_ok or init_result==false then return false,"cc_init_failed" end
             -- Do not enable cc.record() in CC-SIP bridge mode.  The official
             -- Air8000 sip_cc_bridge demo leaves the native CC<->VoIP bridge
             -- alone; recording buffers batch PCM and turn the RTP stream into
             -- roughly 200 ms bursts (the observed ~4.6 packets/s symptom).
             status.cc_downlink_guard=false
             if log then log.info("airsim.media","cc_downlink_guard","disabled","native_sip_bridge") end
-            -- Match the official sip_cc_bridge demo: select the native VoIP
-            -- bridge before starting SIP, then initialize CC.  This prevents
-            -- cc.init() from leaving the modem audio path in its default
-            -- hardware mode while the first SIP media session is starting.
-            if voip and type(voip.setAudioMode)=="function" and voip.AUDIO_MODE_BRIDGE~=nil then
-                local mode_ok,mode_result=pcall(voip.setAudioMode,voip.AUDIO_MODE_BRIDGE)
-                if log then log.info("airsim.media","voip_bridge_mode",tostring(mode_ok and mode_result)) end
-                if not mode_ok or mode_result==false then return false,"voip_bridge_mode_failed" end
-            end
             local start_ok,start_result=pcall(exsip.start)
             if log then log.info("airsim.sip","start",tostring(start_ok and start_result)) end
             if not start_ok or start_result==false then return false,"exsip_start_failed" end
-            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
-            local init_ok,init_result=pcall(cc.init,0)
-            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
-            if not init_ok or init_result==false then return false,"cc_init_failed" end
             return true
         end
     end
@@ -290,43 +322,37 @@ local function init_cc_backend()
     return false,"cc_init_unavailable"
 end
 
--- The no-codec Air8000 bridge demo does not initialize exaudio/ES8311.  Keep
--- SIP and CC startup in a task so the network adapter is ready first.
-local function wifi_network_ready()
-    if not wlan or not wlan.ready or wlan.ready()~=true then return false end
-    local ip
-    if wlan.getIP then ip=wlan.getIP() end
-    if (type(ip)~="string" or ip=="" or ip=="0.0.0.0") and wlan.getIp then ip=wlan.getIp() end
-    return type(ip)=="string" and ip~="" and ip~="0.0.0.0"
-end
-
-local function wait_for_sip_network()
-    if media_backend~="sip_bridge" then return end
-    local waited=0
-    while not wifi_network_ready() do
-        if log and waited==0 then log.info("airsim.sip","waiting_for_wifi_ip") end
-        if sys and sys.waitUntil then sys.waitUntil("IP_READY",1000)
-        elseif sys and sys.wait then sys.wait(1000)
-        else return end
-        waited=waited+1000
+local function init_audio_hardware()
+    if not exaudio or type(exaudio.setup)~="function" then
+        return false,"exaudio_unavailable"
     end
-    if socket and socket.dft and socket.LWIP_STA then pcall(socket.dft,socket.LWIP_STA) end
-    if log then log.info("airsim.sip","wifi_ip_ready",waited) end
+    -- Match module/Air8000/demo/sip_cc_bridge/audio_drv.lua.  The bridge
+    -- still needs the ES8311/I2S driver initialized before CC and VoIP start;
+    -- this is separate from exsip's AUDIO_MODE_BRIDGE selection.
+    local ok,result=pcall(exaudio.setup,{
+        model="es8311",
+        i2c_id=0,
+        pa_ctrl=162,
+        dac_ctrl=164,
+        dac_delay=6,
+        pa_delay=100,
+        dac_time_delay=100,
+        bits_per_sample=16,
+        pa_on_level=1,
+        audio_mode="new",
+    })
+    if not ok or result==false then
+        return false,ok and "exaudio_setup_failed" or tostring(result)
+    end
+    if type(exaudio.vol)=="function" then pcall(exaudio.vol,70) end
+    if type(exaudio.mic_vol)=="function" then pcall(exaudio.mic_vol,96) end
+    if log then log.info("airsim.media","audio_hardware","es8311","audio_mode","new") end
+    return true
 end
 
-local function start_device_backends()
-    if log then log.info("airsim.media","audio_init","skipped_native_cc_voip_bridge") end
-    -- exsip locks its network adapter when start() is called.  Starting it
-    -- before Wi-Fi DHCP completes leaves the SIP task waiting forever for an
-    -- IP_READY event belonging to the wrong adapter.
-    wait_for_sip_network()
-    init_cc_backend()
-end
-if sys and sys.taskInit then
-    sys.taskInit(start_device_backends)
-else
-    start_device_backends()
-end
+local audio_ok,audio_err=init_audio_hardware()
+if log then log.info("airsim.media","audio_init",tostring(audio_ok),tostring(audio_err or "")) end
+init_cc_backend()
 
 local handoff_generation=0
 local function stop_media(finalize_cc)
@@ -522,11 +548,6 @@ local function emit_event(kind,payload)
             -- down both legs when either side ends.
             if payload.event=="dial" then
                 media_phase:transition(media_phase_module.DIALING,"dial")
-                -- The official Air8000 sip_cc_bridge demo requests network
-                -- ringback immediately after cc.dial(). Starting it later
-                -- from media-ready/voip-start can overlap or restart the
-                -- carrier's early-media stream and sounds like double audio.
-                set_bridge_tone(true,"cellular_dial")
             elseif payload.event=="connected" then
                 media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"cellular_connected")
                 disable_bridge_tone("cellular_connected")
@@ -570,7 +591,16 @@ local function emit_event(kind,payload)
 end
 _G.call_service=call_module.new(cc,emit_event)
 _G.sms_service=sms_module.new(sms,function(kind,payload) if _G.relay_client then _G.relay_client:send(kind,payload,os.time()*1000) end end,cfg.limits and cfg.limits.max_sms_body)
-_G.gnss_service=gnss_module.new(gnss_api,cfg.location_policy)
+if module_profile.has_gnss then
+    _G.gnss_service=gnss_module.new(gnss_api,cfg.location_policy)
+else
+    _G.gnss_service={
+        state="disabled",last=nil,
+        start=function() return false,"gnss_unavailable" end,
+        sample=function(self,timestamp) return {fix=false,fix_state="unavailable",timestamp=timestamp} end,
+        on_state=function(self) return self.last end,
+    }
+end
 
 local sip_refreshing=false
 local last_sip_server_instance=nil
@@ -602,16 +632,13 @@ if media_backend=="sip_bridge" and exsip then
                 pcall(exsip.fail,400,"Missing cellular destination")
                 return
             end
-            -- Establish SIP 183/SDP before dialing the cellular leg.  The
-            -- carrier's ringback/early-media PCM then has an active RTP
-            -- destination immediately; dialing first loses that early media.
-            local progress_ok,progress_result=pcall(exsip.progress)
-            if not progress_ok or progress_result==false then
-                pcall(exsip.fail,500,"early_media_failed")
-                return
-            end
             local ok,err=_G.call_service:dial(payload.call_id or tostring(os.time()),number)
-            if not ok then pcall(exsip.fail,486,tostring(err or "Cellular line busy")) end
+            if ok then
+                -- Open SIP early media before the cellular leg answers.
+                pcall(exsip.progress)
+            else
+                pcall(exsip.fail,486,tostring(err or "Cellular line busy"))
+            end
         elseif event_type=="media" and action=="ready" then
             media_phase:transition(media_phase_module.SIP_EARLY_MEDIA,"sip_media_ready")
             announce_media("media.open")
@@ -619,7 +646,7 @@ if media_backend=="sip_bridge" and exsip then
             -- cellular call. Ringback must never be mixed into live speech.
             local current=_G.call_service and _G.call_service.current
             if current and tostring(current.state or "")~="CONNECTED" then
-                set_bridge_tone(true,"sip_media_ready")
+                set_bridge_tone(true,"sip_183_media_ready")
             else
                 disable_bridge_tone("sip_media_ready_connected")
             end
@@ -724,12 +751,6 @@ end
 
 local function handle_gps_request(message_id)
     run_async(function()
-        if not module_profile.has_gnss then
-            local disabled={fix=false,fix_state="disabled",error="gnss_unsupported",timestamp=now_ms()}
-            publish_location(disabled)
-            send_command_result(message_id,false,"gnss_unsupported",disabled)
-            return
-        end
         local started,start_error=_G.gnss_service:start()
         if not started then
             local failed={fix=false,fix_state="unavailable",error=start_error,timestamp=now_ms()}
@@ -802,12 +823,7 @@ local function handle_relay_message(raw,fin,opcode)
         if media_backend=="sip_bridge" and type(instance)=="string" and instance~="" and instance~=last_sip_server_instance then
             local previous=last_sip_server_instance
             last_sip_server_instance=instance
-            -- The official sip_cc_bridge demo keeps SIP running after a
-            -- successful REGISTER. Restart only when an already-known
-            -- gateway instance changes; restarting on the first ACK causes a
-            -- needless media gap immediately after boot.
-            if previous then refresh_sip_registration("gateway_restarted")
-            elseif log then log.info("airsim.sip","registration_synced") end
+            refresh_sip_registration(previous and "gateway_restarted" or "gateway_sync")
         end
         return
     end
@@ -879,16 +895,27 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
             sys.subscribe("IP_READY",function() ip_ready=true end)
             sys.subscribe("IP_LOSE",function() ip_ready=false end)
         end
+        local function network_ready()
+            -- Air8000 has a cellular IP_READY before Wi-Fi DHCP completes.
+            -- The LAN relay must wait for the Wi-Fi adapter and its address,
+            -- otherwise the first WebSocket follows the wrong interface and
+            -- has to be replaced during boot.
+            if not wlan or not wlan.ready or wlan.ready()~=true then return false end
+            local ip
+            if wlan.getIP then ip=wlan.getIP() end
+            if (type(ip)~="string" or ip=="" or ip=="0.0.0.0") and wlan.getIp then ip=wlan.getIp() end
+            return type(ip)=="string" and ip~="" and ip~="0.0.0.0"
+        end
         while true do
             -- The Air8000 WebSocket client must not be started during boot
             -- before the Wi-Fi adapter has acquired an address.  Otherwise
             -- connect() can remain pending without ever sending a handshake.
             local network_wait=0
-            while not wifi_network_ready() and network_wait < 30000 do
+            while not network_ready() and network_wait < 30000 do
                 sys.waitUntil("IP_READY", 1000)
                 network_wait=network_wait+1000
             end
-            if not wifi_network_ready() then
+            if not network_ready() then
                 if log then log.warn("airsim.relay", "network_wait_timeout") end
                 sys.wait(5000)
             end
@@ -943,7 +970,7 @@ if websocket and cfg.relay_url and not cfg.relay_url:find("example%.invalid",1,t
         end
     end)
 end
-if log then log.info("airsim","AirSIM backend starting",PROJECT,VERSION,"model",module_profile.model,"air8000a",tostring(module_profile.is_air8000a)) end
+if log then log.info("airsim","Air8000A backend starting",PROJECT,VERSION) end
 if sys and sys.subscribe then
     sys.subscribe("CC_IND",function(s,value,session)
         if media_backend=="carrier_rtp" then carrier_rtp:on_cc(s,value,session) end

@@ -284,13 +284,7 @@ export class SipUdpServer {
       this.onState({ type: "connected", ...call });
       return;
     }
-    if (req.code >= 300) {
-      call.state = "FAILED";
-      call.failure_code = req.code;
-      call.failure_reason = req.reason || "";
-      this.onState({ type: "failed", ...call });
-      this.#close(call);
-    }
+    if (req.code >= 300) { call.state = "FAILED"; this.onState({ type: "failed", ...call }); this.#close(call); }
   }
 
   #close(call) {

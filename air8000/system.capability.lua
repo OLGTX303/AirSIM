@@ -21,8 +21,7 @@ function M.probe(env)
     }
     c.stock_firmware_voice_supported=c.direct_pcm or c.sip_bridge
     c.real_early_media=c.sip_bridge
-    -- GNSS is optional: Air8000W has no A-module GNSS peripheral.
-    c.required_ok=c.voice and c.sms and c.websocket and c.crypto and c.fskv
+    c.required_ok=c.voice and c.sms and c.websocket and c.crypto and c.fskv and c.gnss
     return c
 end
 return M

@@ -14,7 +14,6 @@ const LAN_MODE = process.env.LAN_MODE === "true";
 const LAN_BOOTSTRAP_ENABLED = LAN_MODE && process.env.LAN_BOOTSTRAP_ENABLED === "true";
 const LAN_BOOTSTRAP_DEVICE_ID = String(process.env.LAN_BOOTSTRAP_DEVICE_ID || "").trim();
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
-const BLE_PAIRING_CODE = /^\d{6}$/.test(String(process.env.BLE_PAIRING_CODE || "")) ? String(process.env.BLE_PAIRING_CODE) : "";
 const AUTO_ENROLL_TOKEN = process.env.AUTO_ENROLL_TOKEN || "";
 const ENROLLMENT_TOKEN = process.env.ENROLLMENT_TOKEN || "";
 const DEVICE_CA_CERT = process.env.DEVICE_CA_CERT || "/data/pki/device-ca.pem";
@@ -118,15 +117,6 @@ function resetMediaStats(deviceID) {
 function getMediaStats(deviceID) {
   let stats=mediaStats.get(deviceID);
   if(!stats)stats=resetMediaStats(deviceID);
-  return stats;
-}
-function beginCallMediaStats(deviceID) {
-  const stats=resetMediaStats(deviceID);
-  const device=devices.get(deviceID);
-  if(device){
-    device.voip_stats=null;
-    device.cc_downlink_guard=null;
-  }
   return stats;
 }
 function firstLanIPv4() {
@@ -290,11 +280,8 @@ async function ensureRtpSession(deviceID) {
         // WebRTC-style adaptive jitter target: keep a bounded cushion above
         // the measured network variation, but never let the startup buffer
         // consume the entire latency budget.
-        session.targetDelayMs=Math.max(240,Math.min(480,Math.ceil((session.jitterMs*4+160)/20)*20));
-        // Do not require more queued packets than a short call may deliver.
-        // At 4-15 packets/s the old 24-60 frame target could wait forever,
-        // leaving browser downlink_frames at zero even though RTP arrived.
-        session.rxWarmupFrames=Math.max(12,Math.min(24,Math.ceil(session.targetDelayMs/20)));
+        session.targetDelayMs=Math.max(480,Math.min(1200,Math.ceil((session.jitterMs*4+160)/20)*20));
+        session.rxWarmupFrames=Math.max(24,Math.min(60,Math.ceil(session.targetDelayMs/20)));
       }
     }
     session.lastArrivalMs=now;
@@ -360,10 +347,7 @@ const sipServer = new SipUdpServer({
   },
   onState(event) {
     if (event.type === "dial" || event.type === "resume" || event.type === "progress" || event.type === "connected" || event.type === "ended" || event.type === "failed") {
-      const detail=event.type === "failed"
-        ? ` code=${event.failure_code || event.code || "unknown"} reason=${String(event.failure_reason || event.reason || "unknown").replace(/[\r\n]+/g," ")}`
-        : "";
-      console.log(`SIP call ${event.type} device=${event.device_id}${detail}`);
+      console.log(`SIP call ${event.type} device=${event.device_id}`);
     }
     if (event.type === "failed" || event.type === "ended") {
       // Native carrier failure/remote release is authoritative. Ensure the
@@ -422,13 +406,9 @@ function releaseRtpMedia(deviceID) {
     try{session.socket.close()}catch{}
     rtpSessions.delete(deviceID);
   }
-  // Keep the completed call's counters visible in the dashboard. The next
-  // media ticket or dial resets them before a new call starts, so this does
-  // not leak stale counters into the next session.
-  const device=devices.get(deviceID);
-  if(device){
-    device.rtp_ready=false;
-  }
+  // Do not let post-call playout silence inflate the next call's diagnostics.
+  // A released carrier session must start with fresh RTP counters.
+  resetMediaStats(deviceID);
 }
 function mediaFramesDue(session,key) {
   const target=Math.floor((performance.now()-session.clockStart)/MEDIA_FRAME_MS);
@@ -655,7 +635,6 @@ const server=http.createServer(async (req,res)=>{
     if (req.method === "GET" && u.pathname === "/api/health") return json(res,200,{ok:true,service:"airsim-air8000-vps",devices:devices.size,server_instance_id:SERVER_INSTANCE_ID});
     if (req.method === "POST" && u.pathname === "/api/enroll") return json(res,201,enrollDevice(await body(req)));
     if (!admin(req)) return json(res,401,{error:"unauthorized"});
-    if (req.method === "GET" && u.pathname === "/api/ble-config") return json(res,200,{pairing_code:BLE_PAIRING_CODE});
     if (req.method === "GET" && u.pathname === "/api/devices") return json(res,200,[...devices.values()].map(publicDevice));
     const match=u.pathname.match(/^\/api\/devices\/([^/]+)\/command$/);
     const mediaMatch=u.pathname.match(/^\/api\/devices\/([^/]+)\/media-ticket$/);
@@ -663,7 +642,7 @@ const server=http.createServer(async (req,res)=>{
       const id=decodeURIComponent(mediaMatch[1]);
       const d=devices.get(id);
       if(!d?.socket || d.socket.readyState!==1)return json(res,409,{error:"device offline"});
-      beginCallMediaStats(id);
+      resetMediaStats(id);
       if(rtpMediaEnabled(d)){
         const session=await ensureRtpSession(id);
         if(carrierRtpEnabled(d)){
@@ -710,7 +689,6 @@ const server=http.createServer(async (req,res)=>{
       const d=devices.get(id);
       if(value.type==="dial" && sipBridgeEnabled(d)){
         try {
-          beginCallMediaStats(id);
           const session=await ensureRtpSession(id);
           resetRtpSession(session);
           const result=await sipServer.invite(d,value.payload?.number,session);
@@ -904,9 +882,6 @@ mediaWss.on("connection",(ws,deviceID)=>{
       if (msg.type === "call.state") {
         const event=String(msg.payload?.event||"");
         const call=msg.payload?.call;
-        if (event === "failed" || event === "hangup" || event === "remote_hangup" || event === "disconnected") {
-          console.log(`Air8000 call state device=${device.device_id} event=${event} state=${String(call?.state || "unknown")} data=${JSON.stringify(msg.payload?.data || {})}`);
-        }
         const ended=["ended","failed","hangup","reject","remote_hangup","disconnected"].includes(event);
         device.status={...(device.status||{}),active_call:ended?null:(call||device.status?.active_call||null)};
         if(ended){
@@ -975,13 +950,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
   ws.on("close", () => {
     if (device?.device_id) {
       const current = devices.get(device.device_id);
-      if (current?.socket === ws) {
-        current.socket = null;
-        current.last_seen = Date.now();
-        current.voip_stats=null;
-        current.cc_downlink_guard=null;
-        current.rtp_ready=false;
-      }
+      if (current?.socket === ws) { current.socket = null; current.last_seen = Date.now(); }
     }
   });
  });

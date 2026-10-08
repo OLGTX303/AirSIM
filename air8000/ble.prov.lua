@@ -32,10 +32,19 @@ function M.start(cfg, identity, wlan_api, kv_api)
     if not wlan_api or not wlan_api.connect then return false, "wifi_unavailable" end
     local bt = bluetooth.init()
     if not bt then return false, "bluetooth_init_failed" end
-    -- main.lua initializes WLAN before starting BLE.  Re-running wlan.init()
-    -- here can reset the STA state on Air8000 and break provisioning just
-    -- after the GATT connection succeeds.
     local wifi_initialized = true
+    if wlan_api.init then
+        wifi_initialized = false
+        for attempt = 1, 5 do
+            local call_ok, init_result = pcall(wlan_api.init)
+            if log then log.info("airsim.ble", "wifi_init", attempt, call_ok, init_result) end
+            if call_ok and init_result ~= false then
+                wifi_initialized = true
+                break
+            end
+            sys.wait(500)
+        end
+    end
 
     local status_payload = safe_status(cfg, identity)
     local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
@@ -44,13 +53,7 @@ function M.start(cfg, identity, wlan_api, kv_api)
     local adv
     local connected = false
     local ble_state = "ready"
-    local configured_pairing_code=tostring(cfg.ble_pairing_code or "")
-    local pairing_code=nil
-    if configured_pairing_code:match("^%d%d%d%d%d%d$") then
-        pairing_code=configured_pairing_code
-    elseif log then
-        log.warn("airsim.ble","pairing_code_not_configured","advertising_read_only")
-    end
+    local pairing_code = tostring(cfg.ble_pairing_code or "")
 
     local function persist_wifi(ssid, password, bssid, security, enrollment_token)
         cfg.wifi = { ssid = ssid, password = password, bssid = bssid, security = security or "auto" }
@@ -58,24 +61,15 @@ function M.start(cfg, identity, wlan_api, kv_api)
         if kv_api and kv_api.set then kv_api:set("config", cfg) end
     end
 
-    local publish_status
-
     local function connect_wifi(ssid, password, bssid)
         local binary_bssid = nil
         if type(bssid) == "string" and bssid:match("^[%da-fA-F]+$") and #bssid == 12 then binary_bssid = string.fromHex(bssid) end
         -- LuatOS documents wlan.connect(ssid, password, auto_reconnect, bssid).
-        local ok, result
-        if binary_bssid then ok, result = pcall(wlan_api.connect, ssid, password, 1, binary_bssid)
-        else ok, result = pcall(wlan_api.connect, ssid, password, 1) end
-        if log then log.info("airsim.ble", "wifi_connect", ok, result) end
-        if not ok then
-            publish_status("connect_error", "wifi_connect_failed")
-            return false
-        end
-        return result ~= false
+        if binary_bssid then return wlan_api.connect(ssid, password, 1, binary_bssid) end
+        return wlan_api.connect(ssid, password, 1)
     end
 
-    publish_status=function(state,error_message,event,data)
+    local function publish_status(state,error_message,event,data)
         local snap=wifi_status.snapshot(wlan_api,cfg,wifi_cache,event,data,os.time()*1000)
         if state then snap.state=state end
         snap.error=error_message
@@ -126,10 +120,12 @@ function M.start(cfg, identity, wlan_api, kv_api)
         if log then log.info("airsim.ble", "write_target", service_uuid, characteristic_uuid, #raw) end
         if service_uuid ~= M.SERVICE_UUID or characteristic_uuid ~= M.CONFIG_UUID then return end
         local request = json.decode(raw)
-        -- Scanning only reads nearby SSIDs and is the first operation sent by
-        -- the provisioning UI.  Do not block it on the optional pairing code;
-        -- the code remains mandatory for changing Wi-Fi credentials below.
-        if type(request) == "table" and request.op == "scan" then
+        if type(request) ~= "table" or request.pairing_code ~= pairing_code then
+            if log then log.info("airsim.ble", "write_rejected", type(request) == "table" and request.op or "invalid", type(request) == "table" and request.pairing_code == pairing_code or false) end
+            publish_status("rejected", "invalid_pairing_or_wifi")
+            return
+        end
+        if request.op == "scan" then
             if not wifi_initialized then
                 publish_status("scan_error", "wifi_not_initialized")
                 return
@@ -139,11 +135,6 @@ function M.start(cfg, identity, wlan_api, kv_api)
                 local scan_ok = wlan_api.scan()
                 if log then log.info("airsim.ble", "wifi_scan_started", scan_ok) end
             end, 100)
-            return
-        end
-        if type(request) ~= "table" or not pairing_code or request.pairing_code ~= pairing_code then
-            if log then log.info("airsim.ble", "write_rejected", type(request) == "table" and request.op or "invalid", type(request) == "table" and request.pairing_code == pairing_code or false) end
-            publish_status("rejected", "invalid_pairing_or_wifi")
             return
         end
         if type(request.ssid) ~= "string" or #request.ssid == 0 or #request.ssid > 64 or type(request.password) ~= "string" or #request.password > 128 then
@@ -192,7 +183,8 @@ function M.start(cfg, identity, wlan_api, kv_api)
     local local_name = "A8-" .. suffix
     adv = ble_device:adv_create({
         addr_mode=ble.PUBLIC, channel_map=ble.CHNLS_ALL, intv_min=120, intv_max=120,
-        adv_data={{ble.FLAGS, string.char(0x06)}, {ble.COMPLETE_LOCAL_NAME, local_name}}
+        adv_data={{ble.FLAGS, string.char(0x06)}, {ble.COMPLETE_LOCAL_NAME, local_name}},
+        adv_prop=ble.ADV_PROP_CONNECTABLE | ble.ADV_PROP_SCANNABLE
     })
     if not adv then return false, "advertise_create_failed" end
     if log then log.info("airsim.ble", "gatt_ready", M.SERVICE_UUID, local_name) end

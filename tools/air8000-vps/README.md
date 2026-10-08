@@ -111,14 +111,6 @@ In `air8000/config.lua`, set the same LAN address before flashing:
 relay_url = "ws://192.168.1.50:8081/device"
 ```
 
-Set the same six-digit BLE pairing code in the host environment so the
-authenticated dashboard fills it automatically; do not commit the value:
-
-```powershell
-$env:BLE_PAIRING_CODE = "your-six-digit-code"
-.\lan-start.ps1
-```
-
 For LAN mode, keep `device_secret` equal to the secret entered into
 `lan-start.ps1`. The device backend now uses the real LuatOS WebSocket client,
 registers with its SN/IMEI, and handles the dashboard's call, SMS, GPS, and

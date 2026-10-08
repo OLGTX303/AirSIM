@@ -4,7 +4,6 @@ return {
     serial_number = nil,
     device_secret = "REPLACE_WITH_PER_DEVICE_SECRET",
     enrollment_token = "REPLACE_WITH_LAN_ENROLLMENT_TOKEN",
-    ble_enabled = true,
     ble_pairing_code = "REPLACE_WITH_6_DIGIT_PAIRING_CODE",
     relay_url = "wss://relay.example.invalid/v1/devices/air8000",
     voice_mode = "compatible", -- compatible | wideband; select before a call
