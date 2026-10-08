@@ -16,7 +16,7 @@ function M.new(cfg)
     local active_high=cfg.active_high~=false
     local pins={
         wifi=tonumber(cfg.wifi_gpio or 146),
-        cellular=tonumber(cfg.cellular_gpio or 20),
+        cellular=tonumber(cfg.cellular_gpio or 27),
     }
     local setters={}
     local state={wifi=false,cellular=false}

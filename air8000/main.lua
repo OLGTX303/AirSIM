@@ -73,9 +73,9 @@ local device_identity=identity.read(mobile,mcu,cfg)
 local status=device.status(caps,device_identity); status.firmware=tostring(_G.VERSION or VERSION); status.voice_mode=cfg.voice_mode; status.stock_firmware_voice_supported=caps.stock_firmware_voice_supported; status.media_backend=media_backend; status.real_early_media=media_backend=="sip_bridge"; status.target_cellular_voice_rate=media_backend=="sip_bridge" and 8000 or nil; status.wideband_volte=false; status.media_transport=media_backend=="sip_bridge" and "sip_rtp" or "direct_pcm"; status.media_rate=8000; status.media_uplink_rate=8000
 local wifi_cache={ssid=cfg.wifi and cfg.wifi.ssid or nil}
 -- Persisted settings from older bundles may not contain the newer LED table.
--- Keep the documented Air8000 defaults active when that happens.
+-- Keep the Air8000 test defaults active when that happens.
 local status_led=status_led_module.new(cfg.status_led or {
-    wifi_gpio=146, cellular_gpio=20, active_high=true,
+    wifi_gpio=146, cellular_gpio=27, active_high=true,
 })
 
 local function now_ms()
