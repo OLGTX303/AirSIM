@@ -46,7 +46,14 @@ function clearDial(){const el=document.querySelector('#call-number');if(el){el.v
 function backspaceDial(){const el=document.querySelector('#call-number');if(el){el.value=(el.value||'').slice(0,-1);localStorage.setItem('airsimDialNumber',el.value)}}
 let activeCallState='IDLE';
 async function phoneKey(value,button){if(activeCallState==='CONNECTED'){await callAction('dtmf',{digit:value},button,'Sent')}else dialDigit(value)}
-async function placeCall(button){try{const d=current();await startVoice();if(d?.voice_mode==='wideband')startLocalRingback();voiceStatus('Carrier media armed — dialing…');await callAction('dial',{number:document.querySelector('#call-number')?.value||''},button,'Call')}catch(e){voiceStatus('Audio unavailable: '+e.message)}}
+async function placeCall(button){
+  const d=current();
+  let audioError=null;
+  try{await startVoice();if(d?.voice_mode==='wideband')startLocalRingback();voiceStatus('Carrier media armed — dialing…')}
+  catch(e){audioError=e;voiceStatus('Browser audio unavailable; sending call anyway…')}
+  await callAction('dial',{number:document.querySelector('#call-number')?.value||''},button,'Call');
+  if(audioError)voiceStatus('Call sent; browser audio unavailable: '+audioError.message);
+}
 async function answerIncoming(button){if(button?.disabled)return;const old=button?.textContent||'Answer and start audio';if(button){button.disabled=true;button.textContent='Starting audio…'}try{await startVoice();stopLocalRingback();await command('answer');voiceStatus('Incoming call answered; carrier audio connected');if(button)button.textContent='Answered'}catch(e){voiceStatus('Answer/audio error: '+e.message);if(button)button.textContent='Failed'}setTimeout(()=>{if(button){button.disabled=false;button.textContent=old}},1800)}
 function fmtNumber(value,digits=1){const n=Number(value);return Number.isFinite(n)?n.toFixed(digits):'-'}
 function fmtCoord(value){const n=Number(value);return Number.isFinite(n)?n.toFixed(7):'-'}
