@@ -292,18 +292,22 @@ local function init_cc_backend()
             -- roughly 200 ms bursts (the observed ~4.6 packets/s symptom).
             status.cc_downlink_guard=false
             if log then log.info("airsim.media","cc_downlink_guard","disabled","native_sip_bridge") end
-            -- Keep the working demo order: initialize CC before starting the
-            -- SIP task.  The modem must have its CC session ready before an
-            -- incoming SIP INVITE can request cc.dial().
-            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
-            local init_ok,init_result=pcall(cc.init,0)
-            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
-            if not init_ok or init_result==false then
-                return false,"cc_init_failed"
+            -- Match the official sip_cc_bridge demo: select the native VoIP
+            -- bridge before starting SIP, then initialize CC.  This prevents
+            -- cc.init() from leaving the modem audio path in its default
+            -- hardware mode while the first SIP media session is starting.
+            if voip and type(voip.setAudioMode)=="function" and voip.AUDIO_MODE_BRIDGE~=nil then
+                local mode_ok,mode_result=pcall(voip.setAudioMode,voip.AUDIO_MODE_BRIDGE)
+                if log then log.info("airsim.media","voip_bridge_mode",tostring(mode_ok and mode_result)) end
+                if not mode_ok or mode_result==false then return false,"voip_bridge_mode_failed" end
             end
             local start_ok,start_result=pcall(exsip.start)
             if log then log.info("airsim.sip","start",tostring(start_ok and start_result)) end
             if not start_ok or start_result==false then return false,"exsip_start_failed" end
+            if not cc or type(cc.init)~="function" then return false,"cc_init_unavailable" end
+            local init_ok,init_result=pcall(cc.init,0)
+            if log then log.info("airsim.call","cc_init",tostring(init_ok and init_result),"sip_bridge") end
+            if not init_ok or init_result==false then return false,"cc_init_failed" end
             return true
         end
     end
