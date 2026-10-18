@@ -8,6 +8,7 @@ import dgram from "node:dgram";
 import { WebSocketServer } from "ws";
 import { buildRtpPacket, createDecimator2x, createInterpolator2x, decodePcmuPayload, encodePcmuFrame, parseRtpPacket, randomRtpState } from "./rtp-pcm.mjs";
 import { SipUdpServer } from "./sip-udp.mjs";
+import { createApnsSender, createIosApi, localGatewayClient } from "./ios-api.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const LAN_MODE = process.env.LAN_MODE === "true";
@@ -628,9 +629,17 @@ function enrollDevice(value) {
 
 if (!LAN_MODE) ensureCA();
 
+const iosApi=createIosApi({
+  accessToken:process.env.IOS_ACCESS_TOKEN||"", allowedBundleId:process.env.ALLOWED_BUNDLE_ID||"", publicUrl:process.env.IOS_PUBLIC_URL||"",
+  stateFile:process.env.IOS_STATE_FILE||"", lanMode:LAN_MODE, devices, targetDeviceID:String(process.env.IOS_AIR8000_DEVICE_ID||"").trim(),
+  apns:process.env.APNS_P8?createApnsSender({teamId:process.env.APNS_TEAM_ID,keyId:process.env.APNS_KEY_ID,p8:process.env.APNS_P8}):null,
+  gateway:localGatewayClient(PORT,ADMIN_TOKEN),
+});
+
 const server=http.createServer(async (req,res)=>{
   try {
     const u=new URL(req.url,"http://localhost");
+    if (u.pathname.startsWith("/ios/")) return iosApi.handleHttp(req,res,u);
     if (req.method === "GET" && u.pathname === "/") { const page=fs.readFileSync(new URL("./public/index.html", import.meta.url)); res.writeHead(200,{"content-type":"text/html; charset=utf-8","cache-control":"no-store, no-cache, must-revalidate","pragma":"no-cache","content-length":page.length}); return res.end(page); }
     if (req.method === "GET" && u.pathname === "/api/health") return json(res,200,{ok:true,service:"airsim-air8000-vps",devices:devices.size,server_instance_id:SERVER_INSTANCE_ID});
     if (req.method === "POST" && u.pathname === "/api/enroll") return json(res,201,enrollDevice(await body(req)));
@@ -715,6 +724,8 @@ const mediaWss=new WebSocketServer({noServer:true});
 // enrollment tokens, device secrets, passwords, SMS, or message payloads.
 wss.on("connection",(ws,req)=>{ console.log(`Air8000 WebSocket accepted from ${req.socket.remoteAddress||"unknown"}`); ws.on("message",(raw,isBinary)=>{ if(!isBinary){ try { const msg=JSON.parse(raw.toString()); console.log(`Air8000 message type=${msg.type||"unknown"} device=${msg.device_id||"unknown"} payload=${msg.payload&&typeof msg.payload==="object"?"present":"absent"}`); } catch { console.log("Air8000 message invalid_json"); } } }); });
 server.on("upgrade", (req, socket, head) => {
+  // iOS media URLs carry the access token and call secret: route before logging.
+  if (String(req.url||"").startsWith("/ios/")) return iosApi.handleUpgrade(req, socket, head, new URL(req.url, "http://localhost"));
   console.log(`Air8000 WebSocket upgrade from ${req.socket.remoteAddress || "unknown"} path=${req.url || ""}`);
   const u = new URL(req.url, "http://localhost");
   if (u.pathname === "/media") {
@@ -945,6 +956,7 @@ mediaWss.on("connection",(ws,deviceID)=>{
         device.events.push({ type: msg.type, payload: msg.payload || {}, timestamp: msg.timestamp || Date.now() });
         if (device.events.length > 100) device.events.shift();
       }
+      try { iosApi.onDeviceMessage(device, msg); } catch (e) { console.error(`iOS API event failed: ${e.message}`); }
     } catch { reject("invalid JSON"); }
   });
   ws.on("close", () => {

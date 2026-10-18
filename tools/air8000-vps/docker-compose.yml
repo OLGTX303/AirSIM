@@ -12,6 +12,14 @@ services:
       RTP_PUBLIC_HOST: "${RTP_PUBLIC_HOST:?set RTP_PUBLIC_HOST}"
       RTP_PORT_BASE: "${RTP_PORT_BASE:-41000}"
       RTP_PORT_COUNT: "${RTP_PORT_COUNT:-64}"
+      # iOS app cloud Relay (/ios/<IOS_ACCESS_TOKEN>/v1/...); empty disables it.
+      IOS_ACCESS_TOKEN: "${IOS_ACCESS_TOKEN:-}"
+      IOS_PUBLIC_URL: "${IOS_PUBLIC_URL:-}"
+      IOS_AIR8000_DEVICE_ID: "${IOS_AIR8000_DEVICE_ID:-}"
+      ALLOWED_BUNDLE_ID: "${ALLOWED_BUNDLE_ID:-}"
+      APNS_TEAM_ID: "${APNS_TEAM_ID:-}"
+      APNS_KEY_ID: "${APNS_KEY_ID:-}"
+      APNS_P8: "${APNS_P8:-}"
     expose: ["8080"]
     ports:
       - "41000-41063:41000-41063/udp"

@@ -49,6 +49,52 @@ Flexible SSL. If Caddy cannot obtain its dashboard certificate while the
 record is proxied, temporarily switch that dashboard record to DNS-only until
 the first certificate is issued, then switch it back to Proxied.
 
+## iOS app cloud Relay
+
+The gateway also serves the AirSIM iOS app's cloud Relay protocol (the same
+`/v1` API as `push-relay-worker`), so the iPhone can call, answer and send SMS
+through this VPS when it is away from the Air8000's Wi-Fi. `ios-api.mjs`
+implements it and drives the Air8000 through the gateway's own admin API, just
+like the dashboard, so the SIP bridge and direct PCM voice paths are reused.
+
+Set these in `.env`, then redeploy:
+
+| Variable | Value |
+|---|---|
+| `IOS_ACCESS_TOKEN` | 32+ random URL-safe characters. Gates the whole iOS API. |
+| `IOS_PUBLIC_URL` | `https://<DOMAIN>` (must be HTTPS; the app rejects HTTP). |
+| `ALLOWED_BUNDLE_ID` | Your own main app Bundle ID. |
+| `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_P8` | Your APNs auth key. `APNS_P8` is the `.p8` PEM on one line with literal `\n`. |
+| `IOS_AIR8000_DEVICE_ID` | Optional. Defaults to the connected Air8000. |
+
+In the iOS app, open **Settings → Cloud Relay** and save:
+
+```text
+https://<DOMAIN>/ios/<IOS_ACCESS_TOKEN>
+```
+
+The app registers its own device ID and secret on first use (trust on first
+use). Only someone who knows the access token can reach the API, so treat the
+whole Relay URL as a secret. Registrations (secret hashes and APNs tokens) are
+stored in `/data/ios-state.json`; commands and calls are in memory.
+
+What works:
+
+- `GET healthz`, `POST v1/devices/register`, `v1/devices/status`,
+  `v1/commands/enqueue` and `v1/commands/result` (dial, SMS, DTMF), and
+  `v1/calls/<uuid>/actions` (answer, reject, end) with result polling.
+- Incoming call → VoIP push to the iPhone (and Watch token if registered).
+  If the caller hangs up first, a background push stops CallKit ringing.
+- Incoming SMS → alert push.
+- Call audio over `wss://<DOMAIN>/ios/<token>/v1/calls/<uuid>/connect`
+  (PCM16 LE, 8 kHz, 20 ms), bridged to the gateway `/media` leg.
+
+Limits: one Air8000 and one call at a time; Live Activity tokens are accepted
+but no Live Activity pushes are sent; the 16 kHz wideband direct-PCM mode and
+legacy `carrier_rtp` do not match the app's 8 kHz audio. Debug builds use the
+APNs sandbox and TestFlight/App Store builds use production; the app reports
+which one when it registers.
+
 ## Enrollment request from Windows
 
 Generate a device key and CSR without sending the private key anywhere:

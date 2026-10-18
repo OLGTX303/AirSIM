@@ -1,9 +1,16 @@
+# Only the mTLS device hostname may set X-Client-*; strip spoofed copies elsewhere.
 {$DOMAIN} {
-  reverse_proxy gateway:8080
+  reverse_proxy gateway:8080 {
+    header_up -X-Client-Verify
+    header_up -X-Client-Subject
+  }
 }
 
 {$ENROLL_DOMAIN} {
-  reverse_proxy gateway:8080
+  reverse_proxy gateway:8080 {
+    header_up -X-Client-Verify
+    header_up -X-Client-Subject
+  }
 }
 
 {$DEVICE_DOMAIN} {

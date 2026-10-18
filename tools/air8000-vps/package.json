@@ -7,7 +7,7 @@
   },
   "scripts": {
     "ble:test": "node ble-test.mjs",
-    "test": "node rtp-pcm.test.mjs && node sip-udp.test.mjs && node voice-path.test.mjs"
+    "test": "node rtp-pcm.test.mjs && node sip-udp.test.mjs && node voice-path.test.mjs && node ios-api.test.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"
