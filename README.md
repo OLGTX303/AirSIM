@@ -4,6 +4,25 @@ AirSIM connects an Air8000A cellular endpoint, iPhone and Apple Watch for calls,
 
 AirSIM is source-available software for personal learning, research and other non-commercial use. It is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), not the OSI Open Source Definition. Do not use it for commercial services or emergency communications.
 
+## Screenshots
+
+The iPhone app in dark and light mode, with a Liquid Glass tab bar and English or Chinese UI.
+
+<p align="center">
+  <img src="AirSIM-xtool/docs/screenshots/dial-dark.png" width="19%" alt="Dial pad, dark mode">
+  <img src="AirSIM-xtool/docs/screenshots/recents-dark.png" width="19%" alt="Recents, dark mode">
+  <img src="AirSIM-xtool/docs/screenshots/messages-dark.png" width="19%" alt="Messages, dark mode">
+  <img src="AirSIM-xtool/docs/screenshots/contacts-dark.png" width="19%" alt="Contacts, dark mode">
+  <img src="AirSIM-xtool/docs/screenshots/settings-dark.png" width="19%" alt="Settings, dark mode">
+</p>
+<p align="center">
+  <img src="AirSIM-xtool/docs/screenshots/dial-light.png" width="19%" alt="Dial pad, light mode">
+  <img src="AirSIM-xtool/docs/screenshots/recents-light.png" width="19%" alt="Recents, light mode">
+  <img src="AirSIM-xtool/docs/screenshots/messages-light.png" width="19%" alt="Messages, light mode">
+  <img src="AirSIM-xtool/docs/screenshots/contacts-light.png" width="19%" alt="Contacts, light mode">
+  <img src="AirSIM-xtool/docs/screenshots/settings-light.png" width="19%" alt="Settings, light mode">
+</p>
+
 ## What is in this repository
 
 | Path | Role |
