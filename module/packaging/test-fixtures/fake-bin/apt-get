@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-
-printf '%s\n' "$*" > "$AIRSIM_BOOTSTRAP_APT_LOG"
