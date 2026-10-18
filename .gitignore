@@ -28,5 +28,3 @@ tools/air8000-vps/.ios-state.json*
 tools/air8000-vps/node_modules/
 LuatOS/
 AirSIM-Air8000-current.zip
-module/module-agent/*.bin
-module/module-agent/*.tar.gz

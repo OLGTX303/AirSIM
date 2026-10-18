@@ -9,12 +9,9 @@ AirSIM is source-available software for personal learning, research and other no
 | Path | Role |
 | --- | --- |
 | [`air8000`](air8000/README.md) | LuatOS Air8000A firmware: cellular calls, SMS, GNSS, Wi-Fi, WebSocket, media and provisioning |
-| [`module/module-agent`](module/module-agent/README.md) | AVF Linux device state, control API, relay and media orchestration |
-| [`module/avf-installerd`](module/avf-installerd) | Signed Debian package installation, health checks and rollback |
-| [`module/packaging`](module/packaging/README.md) | `arm64` Debian package, systemd units and first-install scripts |
 | [`AirSIM-xtool`](AirSIM-xtool/README.md) | iPhone client (SwiftPM + xtool, builds on Linux): CallKit, PushKit, VoWLAN, SMS and Live Activity |
 | [`push-relay-worker`](push-relay-worker/README.md) | Optional Cloudflare Worker relay, APNs, queues, dashboard and WebSocket media |
-| [`tools/air8000-vps`](tools/air8000-vps/README.md) | Optional Air8000 LAN/VPS gateway and browser control panel |
+| [`tools/air8000-vps`](tools/air8000-vps/README.md) | Air8000 LAN/VPS gateway, browser control panel and iOS cloud Relay API |
 | [`docs`](docs) | Protocol, architecture, provisioning, flashing and test notes |
 
 ## Architecture
@@ -60,11 +57,9 @@ Use the deployer's own Cloudflare account, KV, Durable Objects and domain. `APNS
 
 ## Security boundaries
 
-- Agent, installerd and PCM listeners stay on loopback or the AVF private network.
+- Gateway admin, SIP and RTP ports stay private; only the HTTPS/WSS hostnames are public.
 - VoWLAN requests retain timestamp, nonce, HMAC, route allowlists and size limits.
 - Call PCM is memory-only; logs must not contain PCM, complete SMS, Push tokens or secrets.
-- The Agent does not self-update. Updates, repair and rollback go through the independent installerd.
-- installerd accepts only signed, metadata-validated `arm64` Debian packages and does not execute arbitrary shell commands.
 - Emergency calls remain the responsibility of the operating system and carrier phone service.
 
 Never commit APNs keys, Cloudflare tokens, device secrets, Agent tokens, HMAC keys, signing keys, certificates, profiles, real phone numbers or message contents.
@@ -74,9 +69,6 @@ Never commit APNs keys, Cloudflare tokens, device secrets, Agent tokens, HMAC ke
 Run the smallest set matching the change. For a full pre-release check:
 
 ```sh
-(cd module/module-agent && go test ./...)
-(cd module/avf-installerd && go test ./...)
-./module/packaging/test.sh
 (cd push-relay-worker && npm test && npm run check)
 (cd tools/air8000-vps && npm test)
 # iOS app: (cd AirSIM-xtool/AirSIMXtool && xtool dev) on a Linux machine with xtool

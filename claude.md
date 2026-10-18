@@ -17,9 +17,7 @@
 ## 系统边界
 
 - `air8000`：Air8000A LuatOS 固件，负责蜂窝通话、短信、GNSS、Wi-Fi 与媒体。
-- `module/module-agent`：AVF Linux 中的设备状态、控制 API、Relay 与媒体编排。
-- `module/avf-installerd`：独立救援安装服务，只安装通过签名和包元数据校验的 Debian 包。
-- `module/packaging`：单一 `arm64` Debian 包、systemd 单元、签名与首次安装脚本。
+- `tools/air8000-vps`：Air8000 LAN/VPS 网关、浏览器控制台与 iOS 云端 Relay API。
 - `AirSIM-xtool/AirSIMXtool`：iPhone App（SwiftPM + xtool，可在 Linux 构建），CallKit、PushKit、ActivityKit、短信和传输选择。
 - `push-relay-worker`：Cloudflare Worker、KV、Durable Objects、APNs、Dashboard 与 WebSocket。
 
@@ -27,15 +25,12 @@
 
 ## 强制安全规则
 
-1. AVF Agent、installerd 和 PCM 只能监听内部私网或 loopback。
+1. 网关管理、SIP 与 RTP 端口只能监听内部私网或 loopback；只有 HTTPS/WSS 主机名对外。
 2. VoWLAN 必须保留时间戳、nonce、HMAC、路由白名单和大小限制。
 3. 通话 PCM 不落盘，日志不能包含 PCM、完整短信、Push token 或 Secret。
-4. Agent 不得自行更新；更新、修复和回滚只能由独立 installerd 执行。
-5. installerd 不得执行任意 shell，也不得接受错误包名、非 `arm64` 或未签名包。
-6. 紧急呼叫交给系统电话能力，不得宣称 AirSIM 可承担紧急通信。
-7. 普通 Android App 不能绕过 OEM 或系统签名限制强制开启被隐藏/删除的 AVF 功能。
+4. 紧急呼叫交给系统电话能力，不得宣称 AirSIM 可承担紧急通信。
 
-严禁提交或回显：`APNS_P8`、`DASHBOARD_TOKEN`、Cloudflare API token、Apple `.p8`、设备 Secret、Agent token、HMAC、Debian 发布私钥、Android keystore、Apple 证书/profile、真实号码和短信内容。
+严禁提交或回显：`APNS_P8`、`DASHBOARD_TOKEN`、Cloudflare API token、Apple `.p8`、设备 Secret、Agent token、HMAC、Apple 证书/profile、真实号码和短信内容。
 
 ## Apple 签名规则
 
@@ -71,9 +66,6 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，只授权个人学习、研究、
 ## 标准验证
 
 ```sh
-(cd module/module-agent && go test ./...)
-(cd module/avf-installerd && go test ./...)
-./module/packaging/test.sh
 (cd push-relay-worker && npm test && npm run check)
 (cd tools/air8000-vps && npm test)
 # iOS App 在装有 xtool 的 Linux 上构建：(cd AirSIM-xtool/AirSIMXtool && xtool dev)
@@ -84,8 +76,8 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，只授权个人学习、研究、
 ## 部署顺序
 
 1. 刷写并配置 Air8000A 固件（见 `air8000/README.md`）。
-2. 启动 AVF Linux，执行经过核对的一键安装脚本，保存 AVF 私网地址与控制 token。
-3. 验证 Agent、installerd 与 Air8000 控制面。
+2. 部署 `tools/air8000-vps` 网关（LAN 或 VPS），保存管理 token。
+3. 验证网关与 Air8000 控制面。
 4. 使用部署者自己的 Apple 身份配置并签名 `AirSIM-xtool` iOS 工程。
 5. 如需远程模式，创建独立 Relay 资源、设置 Secret、dry-run 后再部署。
 6. 先验证 VoWLAN，再验证公网 Relay、APNs sandbox/production 和 Watch 链路。

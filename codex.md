@@ -4,15 +4,14 @@
 
 ## 1. 项目目标
 
-AirSIM 以三星 Android 手机作为蜂窝电话与短信终端：
+AirSIM 以 Air8000A 蜂窝模块作为电话与短信终端：
 
-- 三星 Android App 对接 Android Telecom、短信、Shizuku 音频桥与 AVF Linux。
-- Android AVF Agent 维护设备状态、命令编排、Relay 会话与媒体状态。
-- `airsim-installerd` 独立于主 Agent，负责签名 Debian 包的安装、健康检查和回滚。
+- Air8000A LuatOS 固件负责蜂窝通话、短信、GNSS、Wi-Fi 与媒体。
+- `tools/air8000-vps` 网关连接 Air8000A，提供浏览器控制台与 iOS 云端 Relay API。
 - iPhone 与 Apple Watch 通过 VoWLAN 或 Cloudflare Relay 使用通话和短信能力。
 - Cloudflare Relay 负责公网事件、APNs、命令队列、Dashboard 与媒体中继。
 
-不要把 AirSIM 描述为软 SIM、运营商替代品或紧急呼叫服务。不要恢复历史品牌、历史硬件模块方案或与当前三星 Android 架构不一致的说明。
+不要把 AirSIM 描述为软 SIM、运营商替代品或紧急呼叫服务。不要恢复历史品牌、历史硬件模块方案或与当前 Air8000A 架构不一致的说明。
 
 AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是 OSI 开源软件。只协助个人学习、研究、实验及许可证列明的其他非商业用途；商业使用、收费服务、商业产品集成和预期商业应用需要版权所有者单独书面授权。修改或分发时必须保留 `LICENSE`、`NOTICE` 和第三方声明。
 
@@ -21,9 +20,6 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 | 范围 | 先读 | 核心入口 | 验证命令 |
 | --- | --- | --- | --- |
 | Air8000A 固件 | `air8000/README.md` | `air8000/main.lua` | `lua air8000/tests/run.lua` |
-| AVF Agent | `module/module-agent/README.md` | `module/module-agent/main.go`、`router.go` | `(cd module/module-agent && go test ./...)` |
-| AVF Installer | `module/packaging/README.md` | `module/avf-installerd/` | `(cd module/avf-installerd && go test ./...)` |
-| Debian 发布 | `module/packaging/README.md` | `module/packaging/build-avf-deb.sh` | `./module/packaging/test.sh` |
 | iOS App | `AirSIM-xtool/README.md` | `AirSIM-xtool/AirSIMXtool/Sources/AirSIM/` | Linux 上 `xtool dev` |
 | VPS 网关 | `tools/air8000-vps/README.md` | `tools/air8000-vps/server.mjs`、`ios-api.mjs` | `(cd tools/air8000-vps && npm test)` |
 | Cloudflare Relay | `push-relay-worker/README.md` | `push-relay-worker/src/index.mjs` | `(cd push-relay-worker && npm test && npm run check)` |
@@ -33,16 +29,13 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 
 ## 3. 不可破坏的架构契约
 
-1. Android 端面向三星 Android 与系统电话能力，紧急呼叫交回系统电话 App。
-2. AVF Linux 只发布一个 `airsim-avf-agent_<version>-<release>_arm64.deb`；硬件差异由 Android App 的能力探测与适配层处理。
-3. 主 Agent 不自更新。Android App 调用独立 `airsim-installerd` 完成检查、安装、修复和回滚。
-4. Installer 只接受包名 `airsim-avf-agent`、架构 `arm64` 且 Ed25519 签名有效的 Debian 包，不能执行任意 shell。
-5. AVF 控制和 PCM 服务只监听内部私网或 loopback，不得暴露到通用 Wi-Fi、热点、蜂窝或公网接口。
-6. VoWLAN 控制面必须执行路由白名单、时间戳、nonce、HMAC 和消息大小校验。
-7. 通话建立时确定 VoWLAN 或 Relay 传输；本次通话结束前不得静默切换路径。
-8. PCM 只在内存与网络中处理，不保存到磁盘或诊断日志。
-9. iOS 工程中的 `com.example.airsim`（xtool 为 `com.example.airsim.xtool`）是占位符。部署者必须使用自己的 Apple Team、唯一 Bundle ID、证书和 provisioning profile。
-10. Relay 的 `ALLOWED_BUNDLE_ID` 必须等于重新签名后的主 iOS App Bundle ID。
+1. 紧急呼叫交回系统电话 App，AirSIM 不承担紧急通信。
+2. 网关管理、SIP、RTP 与 PCM 服务只监听内部私网或 loopback，只有 HTTPS/WSS 主机名对外。
+3. VoWLAN 控制面必须执行路由白名单、时间戳、nonce、HMAC 和消息大小校验。
+4. 通话建立时确定 VoWLAN 或 Relay 传输；本次通话结束前不得静默切换路径。
+5. PCM 只在内存与网络中处理，不保存到磁盘或诊断日志。
+6. iOS 工程中的 `com.example.airsim`（xtool 为 `com.example.airsim.xtool`）是占位符。部署者必须使用自己的 Apple Team、唯一 Bundle ID、证书和 provisioning profile。
+7. Relay 的 `ALLOWED_BUNDLE_ID` 必须等于重新签名后的主 iOS App Bundle ID。
 
 ## 4. 安全与 Secret 规则
 
@@ -52,8 +45,7 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 - `DASHBOARD_TOKEN`
 - Cloudflare API token
 - Agent bearer token、设备 Secret、配对密钥与 HMAC
-- AVF Debian 发布私钥
-- Android keystore、Apple 签名身份和 provisioning profile
+- Apple 签名身份和 provisioning profile
 - 真实号码、完整短信、Push token 与 PCM 数据
 
 Relay 的 `APNS_P8` 和 `DASHBOARD_TOKEN` 是必需的 Cloudflare Worker Secret。`wrangler.example.toml` 只能声明名称；生产值使用 `wrangler secret put`、versions secret 流程或 CI Secret Store 提供。不要把 Secret 放入 `[vars]`。
@@ -82,15 +74,12 @@ git grep -nE 'BEGIN (EC |)PRIVATE KEY|APNS_P8[[:space:]]*=|DASHBOARD_TOKEN[[:spa
 
 ## 6. 构建与验证
 
-### AVF Agent、Installer 与 Debian 包
+### Air8000A 固件与网关
 
 ```sh
-(cd module/module-agent && go test ./...)
-(cd module/avf-installerd && go test ./...)
-./module/packaging/test.sh
+lua air8000/tests/run.lua
+(cd tools/air8000-vps && npm test)
 ```
-
-正式构建需要仓库外的 Ed25519 私钥与对应公钥。无私钥构建只能视为开发产物，不能声称通过生产 installerd 验签。
 
 ### iOS
 
@@ -117,14 +106,12 @@ npx wrangler deploy --dry-run --config wrangler.toml
 
 ## 7. 部署清单
 
-### 三星 Android 与 AVF
+### Air8000A 与网关
 
-- AirSIM APK 已构建、签名并安装。
-- AirSIM 已设为默认电话 App；Shizuku 已运行并授权。
-- AVF Linux 已启动，首次安装脚本的来源和签名公钥已核对。
-- Android App 保存了正确的 AVF 私网地址和控制 token。
-- Agent、installerd 与音频桥健康；外部网络无法访问内部端口。
-- 拨号、接听、拒接、挂断、DTMF、短信、双向 PCM 和重启恢复已验证。
+- Air8000A 固件已刷写，Wi-Fi 与网关地址配置正确。
+- 网关 `.env` 中的管理 token、设备 Secret、iOS 访问 token 与 APNs 凭据仅保存在本地。
+- 外部网络无法访问网关管理、SIP 与 RTP 内部端口。
+- 拨号、接听、拒接、挂断、DTMF、短信、双向音频和重启恢复已验证。
 
 ### iPhone 与 Apple Watch
 
@@ -144,4 +131,4 @@ npx wrangler deploy --dry-run --config wrangler.toml
 
 ## 8. 完成标准
 
-“构建通过”只说明本地编译或测试成功；“部署完成”必须有目标环境的部署结果；“真机可用”必须有实际三星 Android、iPhone/Apple Watch、AVF 和网络链路证据。不能把未执行的步骤写成已完成。
+“构建通过”只说明本地编译或测试成功；“部署完成”必须有目标环境的部署结果；“真机可用”必须有实际 Air8000A、iPhone/Apple Watch 和网络链路证据。不能把未执行的步骤写成已完成。

@@ -3,7 +3,7 @@
 Air8000A is the preferred carrier endpoint. LuatOS owns CC/VoLTE, SMS, GNSS,
 Wi-Fi/cellular networking, media selection, watchdog and FOTA. The iPhone and
 Watch continue to use the existing Relay/CallKit/PushKit path. Samsung Android,
-AVF and Shizuku remain a separately selectable `legacy_android` backend.
+The former Samsung Android, Shizuku and AVF backend has been removed from the repository.
 
 The device registers over outbound authenticated WSS. Relay changes should be
 additive so existing iOS users remain compatible. Direct PCM is preferred only
