@@ -274,25 +274,12 @@ curl --fail --show-error \
 
 ## 6. 配置 iOS App
 
-主 App 的 `Info.plist` 从构建设置读取：
+iOS App 位于 [`AirSIM-xtool/AirSIMXtool`](../AirSIM-xtool/README.md)，用 xtool 构建。Relay 地址可以：
 
-- `AIRSIM_PUSH_RELAY_URL`：例如 `https://push.remotepilot.site`，不要带尾部路径。
-- `AIRSIM_APNS_ENVIRONMENT`：Debug 使用 `sandbox`，Release/TestFlight 使用 `production`。
-- `APS_ENVIRONMENT`：Debug 为 `development`，Release 为 `production`，必须与签名 profile 一致。
+- 在 App「设置 → 云端 Relay」中填写并保存，例如 `https://push.remotepilot.site`，不要带尾部路径；或
+- 在 `AirSIM-Info.plist` 中预置 `AirSIMPushRelayURL`。
 
-可以在 Xcode Target 的 Build Settings 中设置，也可以在自动化构建时覆盖：
-
-```sh
-xcodebuild \
-  -project iOS/AirSIM.xcodeproj \
-  -scheme AirSIM \
-  -configuration Debug \
-  AIRSIM_PUSH_RELAY_URL=https://push.remotepilot.site \
-  AIRSIM_APNS_ENVIRONMENT=sandbox \
-  APS_ENVIRONMENT=development
-```
-
-正式包改用 `Release`、`production` 和分发签名。不要让用户在 App 中输入 `.p8`；APNs 私钥只属于 Relay。
+APNs 环境由 `AirSIM-Info.plist` 的 `AirSIMAPNSEnvironment` 决定：缺省为 `sandbox`（xtool 开发安装），正式包设为 `production`。`AirSIM.entitlements` 的 `aps-environment` 必须与签名 profile 一致（开发为 `development`）。不要让用户在 App 中输入 `.p8`；APNs 私钥只属于 Relay。
 
 ## 7. 设备如何自动注册
 

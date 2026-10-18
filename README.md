@@ -1,6 +1,6 @@
 # AirSIM
 
-AirSIM connects an Air8000A cellular endpoint, iPhone and Apple Watch for calls, SMS and remote control. The Air8000A backend is the active hardware path. The former Samsung Android client and audio bridge are preserved under [`legacy/android`](legacy/android) for reference only.
+AirSIM connects an Air8000A cellular endpoint, iPhone and Apple Watch for calls, SMS and remote control. The Air8000A backend is the active hardware path. The former Samsung Android client has been removed; it remains in Git history before this change.
 
 AirSIM is source-available software for personal learning, research and other non-commercial use. It is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), not the OSI Open Source Definition. Do not use it for commercial services or emergency communications.
 
@@ -12,7 +12,7 @@ AirSIM is source-available software for personal learning, research and other no
 | [`module/module-agent`](module/module-agent/README.md) | AVF Linux device state, control API, relay and media orchestration |
 | [`module/avf-installerd`](module/avf-installerd) | Signed Debian package installation, health checks and rollback |
 | [`module/packaging`](module/packaging/README.md) | `arm64` Debian package, systemd units and first-install scripts |
-| [`iOS`](iOS/README.md) | iPhone and Apple Watch CallKit, PushKit, VoWLAN, SMS and Live Activity client |
+| [`AirSIM-xtool`](AirSIM-xtool/README.md) | iPhone client (SwiftPM + xtool, builds on Linux): CallKit, PushKit, VoWLAN, SMS and Live Activity |
 | [`push-relay-worker`](push-relay-worker/README.md) | Optional Cloudflare Worker relay, APNs, queues, dashboard and WebSocket media |
 | [`tools/air8000-vps`](tools/air8000-vps/README.md) | Optional Air8000 LAN/VPS gateway and browser control panel |
 | [`docs`](docs) | Protocol, architecture, provisioning, flashing and test notes |
@@ -43,7 +43,7 @@ Read [`air8000/README.md`](air8000/README.md), [`docs/AIR8000_BUILD.md`](docs/AI
 
 ### iPhone and Apple Watch
 
-Open `iOS/AirSIM.xcodeproj` in Xcode. Replace the placeholder `com.example.airsim` with a unique Bundle ID controlled by the deployer, then configure the Watch App, Live Activity and test targets from that identifier. Use the matching APNs sandbox or production environment; never reuse another developer's signing identity.
+Build `AirSIM-xtool/AirSIMXtool` with [xtool](https://github.com/xtool-org/xtool) on Linux or WSL (`xtool dev`); see [`AirSIM-xtool/README.md`](AirSIM-xtool/README.md). Replace the placeholder `com.example.airsim.xtool` with a unique Bundle ID controlled by the deployer. Use the matching APNs sandbox or production environment; never reuse another developer's signing identity.
 
 ### Optional Relay
 
@@ -78,9 +78,8 @@ Run the smallest set matching the change. For a full pre-release check:
 (cd module/avf-installerd && go test ./...)
 ./module/packaging/test.sh
 (cd push-relay-worker && npm test && npm run check)
-xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
-  -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO build-for-testing
+(cd tools/air8000-vps && npm test)
+# iOS app: (cd AirSIM-xtool/AirSIMXtool && xtool dev) on a Linux machine with xtool
 ```
 
 Automated checks do not prove carrier VoLTE, real two-way audio, APNs production delivery, Watch background behavior, target-phone compatibility or Relay production readiness. Those require the deployer's own devices, accounts, signing assets and network.
@@ -93,7 +92,6 @@ Automated checks do not prove carrier VoLTE, real two-way audio, APNs production
 - [Air8000 testing](docs/AIR8000_TESTING.md)
 - [VoWLAN design](docs/2026-09-11-vowlan-design.md)
 - [Samsung hotspot pairing protocol](docs/samsung-hotspot-pairing-protocol.md)
-- [Legacy Android snapshot](legacy/android)
 - [Codex deployment guidance](codex.md)
 - [General LLM project contract](LLM.txt)
 

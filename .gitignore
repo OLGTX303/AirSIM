@@ -1,15 +1,13 @@
 .DS_Store
 .idea/
 .vscode/
-android/phone-control-app/build/
-android/phone-audio-bridge/build/
 *.log
 *.xcuserstate
 **/xcuserdata/
 **/.build/
 **/DerivedData/
 **/build-device/
-iOS/build/
+AirSIM-xtool/AirSIMXtool/xtool/
 *.ipa
 *.apk
 *.aab
@@ -26,6 +24,7 @@ push-relay-worker/wrangler.toml
 push-relay-worker/.dev.vars*
 push-relay-worker/.env*
 tools/air8000-vps/.lan-secrets.json
+tools/air8000-vps/.ios-state.json*
 tools/air8000-vps/node_modules/
 LuatOS/
 AirSIM-Air8000-current.zip

@@ -16,12 +16,11 @@
 
 ## 系统边界
 
-- `android/phone-control-app`：三星默认电话角色、Android Telecom、短信、VoWLAN、配对、AVF 启动引导和安装管理。
-- `android/phone-audio-bridge`：Shizuku `UserService`，负责双向通话 PCM。
+- `air8000`：Air8000A LuatOS 固件，负责蜂窝通话、短信、GNSS、Wi-Fi 与媒体。
 - `module/module-agent`：AVF Linux 中的设备状态、控制 API、Relay 与媒体编排。
 - `module/avf-installerd`：独立救援安装服务，只安装通过签名和包元数据校验的 Debian 包。
 - `module/packaging`：单一 `arm64` Debian 包、systemd 单元、签名与首次安装脚本。
-- `iOS`：iPhone、Apple Watch、CallKit、PushKit、ActivityKit、短信和传输选择。
+- `AirSIM-xtool/AirSIMXtool`：iPhone App（SwiftPM + xtool，可在 Linux 构建），CallKit、PushKit、ActivityKit、短信和传输选择。
 - `push-relay-worker`：Cloudflare Worker、KV、Durable Objects、APNs、Dashboard 与 WebSocket。
 
 跨组件协议变更必须同时更新生产者、消费者、模型、测试和文档。不得只让一端编译通过。
@@ -72,30 +71,25 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，只授权个人学习、研究、
 ## 标准验证
 
 ```sh
-./android/phone-control-app/test.sh
-./android/phone-audio-bridge/build.sh
-./android/phone-control-app/build.sh
-sh ./android/phone-control-app/verify-apk.sh
 (cd module/module-agent && go test ./...)
 (cd module/avf-installerd && go test ./...)
 ./module/packaging/test.sh
 (cd push-relay-worker && npm test && npm run check)
-xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
-  -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO build-for-testing
+(cd tools/air8000-vps && npm test)
+# iOS App 在装有 xtool 的 Linux 上构建：(cd AirSIM-xtool/AirSIMXtool && xtool dev)
 ```
 
 按变更范围运行最小充分验证。修改协议或共享配置时运行两端测试；发布前运行全套。文档变更至少执行 `git diff --check`、相对链接检查和敏感值扫描。
 
 ## 部署顺序
 
-1. 构建并安装三星 Android App，设置默认电话角色并授权 Shizuku。
+1. 刷写并配置 Air8000A 固件（见 `air8000/README.md`）。
 2. 启动 AVF Linux，执行经过核对的一键安装脚本，保存 AVF 私网地址与控制 token。
-3. 验证 Agent、installerd、音频桥和 Android Telecom 控制面。
-4. 使用部署者自己的 Apple 身份配置并签名 iOS/watchOS 工程。
+3. 验证 Agent、installerd 与 Air8000 控制面。
+4. 使用部署者自己的 Apple 身份配置并签名 `AirSIM-xtool` iOS 工程。
 5. 如需远程模式，创建独立 Relay 资源、设置 Secret、dry-run 后再部署。
 6. 先验证 VoWLAN，再验证公网 Relay、APNs sandbox/production 和 Watch 链路。
-7. 完成三星来电/去电、短信、双向音频、后台唤醒、断网、重启和回滚验收。
+7. 完成 Air8000 来电/去电、短信、双向音频、后台唤醒、断网、重启和回滚验收。
 
 ## 报告格式
 

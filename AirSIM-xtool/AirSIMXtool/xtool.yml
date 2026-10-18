@@ -1,0 +1,17 @@
+version: 1
+bundleID: com.example.airsim.xtool
+product: AirSIMXtool
+infoPath: AirSIM-Info.plist
+entitlementsPath: AirSIM.entitlements
+iconPath: Icons/AppIcon.png
+# xtool can't compile Assets.car, so the icons ship as loose PNGs at the .app
+# root; AirSIM-Info.plist lists them under CFBundleIcons (dark = alternate).
+resources:
+  - Icons/AppIcon@2x.png
+  - Icons/AppIcon@3x.png
+  - Icons/AppIcon~ipad.png
+  - Icons/AppIcon@2x~ipad.png
+  - Icons/AppIconDark@2x.png
+  - Icons/AppIconDark@3x.png
+  - Icons/AppIconDark~ipad.png
+  - Icons/AppIconDark@2x~ipad.png

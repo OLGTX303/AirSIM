@@ -20,12 +20,12 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 
 | 范围 | 先读 | 核心入口 | 验证命令 |
 | --- | --- | --- | --- |
-| 三星控制 App | `android/phone-control-app/README.md` | `android/phone-control-app/src/`、`build.sh` | `./android/phone-control-app/test.sh` |
-| 三星音频桥 | `android/phone-audio-bridge/README.md` | `android/phone-audio-bridge/src/`、`run-device-bridge.sh` | `./android/phone-audio-bridge/build.sh` |
+| Air8000A 固件 | `air8000/README.md` | `air8000/main.lua` | `lua air8000/tests/run.lua` |
 | AVF Agent | `module/module-agent/README.md` | `module/module-agent/main.go`、`router.go` | `(cd module/module-agent && go test ./...)` |
 | AVF Installer | `module/packaging/README.md` | `module/avf-installerd/` | `(cd module/avf-installerd && go test ./...)` |
 | Debian 发布 | `module/packaging/README.md` | `module/packaging/build-avf-deb.sh` | `./module/packaging/test.sh` |
-| iOS / watchOS | `iOS/README.md` | `iOS/AirSIM.xcodeproj`、`iOS/AirSIM/` | `xcodebuild ... build-for-testing` |
+| iOS App | `AirSIM-xtool/README.md` | `AirSIM-xtool/AirSIMXtool/Sources/AirSIM/` | Linux 上 `xtool dev` |
+| VPS 网关 | `tools/air8000-vps/README.md` | `tools/air8000-vps/server.mjs`、`ios-api.mjs` | `(cd tools/air8000-vps && npm test)` |
 | Cloudflare Relay | `push-relay-worker/README.md` | `push-relay-worker/src/index.mjs` | `(cd push-relay-worker && npm test && npm run check)` |
 | 协议 | `docs/` | VoWLAN 与三星热点配对文档 | 对照双方实现与测试 |
 
@@ -41,7 +41,7 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 6. VoWLAN 控制面必须执行路由白名单、时间戳、nonce、HMAC 和消息大小校验。
 7. 通话建立时确定 VoWLAN 或 Relay 传输；本次通话结束前不得静默切换路径。
 8. PCM 只在内存与网络中处理，不保存到磁盘或诊断日志。
-9. iOS/watchOS 工程中的 `com.example.airsim` 是占位符。部署者必须使用自己的 Apple Team、唯一 Bundle ID、证书和 provisioning profile。
+9. iOS 工程中的 `com.example.airsim`（xtool 为 `com.example.airsim.xtool`）是占位符。部署者必须使用自己的 Apple Team、唯一 Bundle ID、证书和 provisioning profile。
 10. Relay 的 `ALLOWED_BUNDLE_ID` 必须等于重新签名后的主 iOS App Bundle ID。
 
 ## 4. 安全与 Secret 规则
@@ -82,17 +82,6 @@ git grep -nE 'BEGIN (EC |)PRIVATE KEY|APNS_P8[[:space:]]*=|DASHBOARD_TOKEN[[:spa
 
 ## 6. 构建与验证
 
-### Android
-
-```sh
-./android/phone-control-app/test.sh
-./android/phone-audio-bridge/build.sh
-./android/phone-control-app/build.sh
-sh ./android/phone-control-app/verify-apk.sh
-```
-
-APK 路径以组件 README 和构建脚本输出为准。真实通话验收还需检查默认电话角色、Shizuku、AVF 私网、拨号、接听、挂断、短信、双向音频和重启恢复。
-
 ### AVF Agent、Installer 与 Debian 包
 
 ```sh
@@ -103,14 +92,13 @@ APK 路径以组件 README 和构建脚本输出为准。真实通话验收还�
 
 正式构建需要仓库外的 Ed25519 私钥与对应公钥。无私钥构建只能视为开发产物，不能声称通过生产 installerd 验签。
 
-### iOS / watchOS
+### iOS
+
+在装有 xtool 的 Linux 上构建并安装到已连接的 iPhone：
 
 ```sh
-xcodebuild -project iOS/AirSIM.xcodeproj \
-  -scheme AirSIM \
-  -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO \
-  build-for-testing
+cd AirSIM-xtool/AirSIMXtool
+xtool dev
 ```
 
 模拟器构建不能验证 PushKit、CallKit 真机生命周期、APNs、Watch 配套安装、蜂窝通话或通话音频。真机安装前必须完成 Bundle ID、Team、capabilities、entitlements 和 provisioning profile 的整套替换。
